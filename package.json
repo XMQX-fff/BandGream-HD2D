@@ -1,15 +1,22 @@
 {
-  "name": "workspace",
+  "name": "ot2-hd2d-harbor",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "private": true,
+  "description": "HD-2D 风格港口小镇 · 基于 three.js 的浏览器 3D 游戏原型（视觉参考《歧路旅人 2》）",
   "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "shoot": "python3 tools/shoot.py"
+  },
+  "keywords": [
+    "three.js",
+    "webgl",
+    "hd-2d",
+    "pixel-art"
+  ],
+  "license": "MIT",
   "dependencies": {
     "three": "^0.186.1"
   },

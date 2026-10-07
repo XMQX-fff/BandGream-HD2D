@@ -30,7 +30,6 @@ import {
   LinearFilter,
   RepeatWrapping
 } from 'three';
-import { loadPixel } from './textures.js';
 import * as HD2D_GEN from './hd2dTextures.js';
 import { initHD2D } from './textures.js';
 import { createWater } from './water.js';

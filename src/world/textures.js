@@ -27,23 +27,15 @@
  * 两者各管一件事，互不干涉。这正是 hd2d-diorama 项目的做法。
  */
 import {
-  TextureLoader,
   NearestFilter,
   LinearFilter,
   LinearMipmapLinearFilter,
   RepeatWrapping,
   SRGBColorSpace,
-  LinearSRGBColorSpace,
   CanvasTexture
 } from 'three';
 
-const loader = new TextureLoader();
 const cache = new Map();
-
-// Kenney Retro Textures（CC0）—— 64×64 手绘
-const RETRO = 'assets/retro/';
-// Poly Haven（CC0）—— 1K 照片
-const PHOTO = 'assets/';
 
 /** 放大采样统一用线性：提供 1px 抗锯齿，消除采样点跳变的闪烁 */
 const MAG = LinearFilter;
@@ -108,48 +100,28 @@ export function getHD2D() {
 }
 
 /* ------------------------------------------------------------------ */
-/* Kenney Retro                                                          */
+/*  外部贴图加载 —— 已移除                                                  */
 /* ------------------------------------------------------------------ */
-
-export function loadPixel(name, repeat = 1) {
-  const key = `px:${name}:${repeat}`;
-  if (cache.has(key)) return cache.get(key);
-  const tex = loader.load(`${RETRO}${name}.png`);
-  tex.colorSpace = SRGBColorSpace;
-  cache.set(key, configure(tex, repeat));
-  return tex;
-}
-
-/* ------------------------------------------------------------------ */
-/* Poly Haven 高频照片贴图                                                */
-/* ------------------------------------------------------------------ */
-
-export function loadPhoto(name, repeat = 1, map = 'diff') {
-  const key = `ph:${name}:${map}:${repeat}`;
-  if (cache.has(key)) return cache.get(key);
-  const tex = loader.load(`${PHOTO}${name}_${map}_512.jpg`);
-  // 法线/粗糙度是数据贴图，必须线性空间，否则光照会算错
-  tex.colorSpace = map === 'diff' ? SRGBColorSpace : LinearSRGBColorSpace;
-  cache.set(key, configure(tex, repeat));
-  return tex;
-}
-
-/* ------------------------------------------------------------------ */
-/* 兼容旧调用名                                                           */
-/* ------------------------------------------------------------------ */
-
-export const loadColor = loadPixel;
-export const loadNormal = (name, repeat) => loadPixel(name, repeat);
-export const loadRough = (name, repeat) => loadPixel(name, repeat);
-
-/** 水面等需要独立调整的场景，直接拿原始纹理自己配 */
-export function makePixelTexture(texture, repeat = 1) {
-  texture.wrapS = RepeatWrapping;
-  texture.wrapT = RepeatWrapping;
-  texture.repeat.set(repeat, repeat);
-  texture.magFilter = NearestFilter;
-  texture.minFilter = NearestFilter;
-  texture.generateMipmaps = false;
-  texture.anisotropy = 1;
-  return texture;
-}
+/*
+ * 这里原本有三组基于「下载的外部贴图文件」的加载器：
+ *
+ *   loadPixel(name)          → assets/retro/<name>.png     （Kenney Retro, CC0）
+ *   loadPhoto(name, _, map)  → assets/<name>_<map>_512.jpg （Poly Haven, CC0）
+ *   loadColor / loadNormal / loadRough  → loadPixel 的别名
+ *   makePixelTexture(tex)     → 手工配置纹理采样器
+ *
+ * 全部删除，理由是逐项核对后确认从未被调用：
+ *   - loadPixel：scene.js 里有一行 `import { loadPixel }`，但没有任何调用点。
+ *     只看 import 会误以为「在用」，实际是遗留的未使用导入。
+ *   - loadPhoto / loadColor / loadNormal / loadRough / makePixelTexture：零引用。
+ *   - vite 构建产物里不含这些函数，tree-shaking 早就剔除了它们 ——
+ *     属于纯死代码，留在源码里只会误导后来的人。
+ *
+ * 随之删除的资源文件（共 27 个）：
+ *   public/assets/retro/*.png                15 个（无任何代码引用）
+ *   public/assets/*_diff_512.jpg 等12 个      （只被 loadPhoto 引用）
+ *
+ * 画面中所有贴图都由 hd2dTextures.js 用 Canvas 程序化生成
+ * （见 initHD2D / HD2D.tex），不依赖任何外部图片 ——
+ * 这也是本项目仅靠约 661KB 的 JS 产物就能完整运行的原因。
+ */

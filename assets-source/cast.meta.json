@@ -1,0 +1,22 @@
+{
+  "tile": 16,
+  "dirs": 4,
+  "frames": 4,
+  "cast": [
+    "ch_00",
+    "ch_01",
+    "ch_02",
+    "ch_04",
+    "ch_05",
+    "ch_07",
+    "ch_09",
+    "ch_10"
+  ],
+  "rows": [
+    "down",
+    "up",
+    "left",
+    "right"
+  ],
+  "license": "Kenney Roguelike Characters (CC0) - kenney.nl"
+}

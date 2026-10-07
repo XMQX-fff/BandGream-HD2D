@@ -8,7 +8,9 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "shoot": "python3 tools/shoot.py"
+    "shoot": "xvfb-run -a python3.11 tools/shoot.py",
+    "diagnose": "xvfb-run -a python3.11 tools/diagnose_camera.py",
+    "build:cast": "python3.11 tools/build_cast.py"
   },
   "keywords": [
     "three.js",

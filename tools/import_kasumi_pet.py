@@ -33,13 +33,46 @@ codex-pet.org 宠物包 kasumi-orange
 from PIL import Image
 import json
 import os
+import sys
 
-SRC_DIR = '/tmp/pet_dl'
-SHEET = os.path.join(SRC_DIR, 'sheet.png')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from cast_source import build_sheet
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
+# ---- 目录契约（与 build_cast.py 保持一致）--------------------------
+# 源素材：香橙的 spritesheet 由下载步骤放到 assets-source/hero/，
+# 之前写死在 /tmp/pet_dl —— /tmp 会被清理，等于这条管线不可复现。
+SRC_DIR = os.environ.get(
+    'KASUMI_SHEET',
+    os.path.join(ROOT, 'assets-source', 'hero', 'sheet.png')
+)
+SHEET = SRC_DIR
+
+# 产物：图集进public（运行时真正要加载的只有它），
+# 元数据进 assets-source（运行时没有任何 fetch 引用，放public 只是白下载）。
+OUT_DIR = os.path.join(ROOT, 'public', 'assets', 'chars')
+OUT_PNG = os.path.join(OUT_DIR, 'cast.png')
+OUT_JSON = os.path.join(ROOT, 'assets-source', 'cast.meta.json')
+
+# NPC 用的 Kenney 16x16 源图（与 build_cast.py 同一份素材）
+NPC_SRC_DIR = os.path.join(ROOT, 'assets-source', 'cast')
+
+# 验证图输出到构建目录下的 preview/，不污染源码树
+PREVIEW_DIR = os.path.join(ROOT, 'preview')
+
 TILE = 32
 DIRS, FRAMES = 4, 4
 SRC_CW, SRC_CH = 192, 208# 原格子
 COLS, ROWS = 8, 9
+
+if not os.path.exists(SHEET):
+    raise SystemExit(
+        '找不到香橙源图：%s\n'
+        '该文件来自 codex-pet.org 的 kasumi-orange spritesheet，\n'
+        '请放到 assets-source/hero/sheet.png，或用 KASUMI_SHEET 指定路径。' % SHEET
+    )
 
 sheet = Image.open(SHEET).convert('RGBA')
 
@@ -163,22 +196,29 @@ for i, c in enumerate(LEFT_COLS):
 for i, c in enumerate(RIGHT_COLS):
     atlas.paste(normalize(src_frame(1, c)), (i * TILE, 3 * TILE))
 
-# NPC（Kenney CC0）保持在第 1~7 个角色的位置
-npc_src = [0, 1, 2, 4, 5, 7, 9]
-for ci, sc in enumerate(npc_src):
+# NPC（Kenney CC0）排在香橙之后，占第 1~7 个角色的位置。
+#
+# 【原来这里读/tmp/cast_backup.png —— 那是 build_cast.py 的一次性产物】
+# /tmp 会被清理，一旦清掉整条 NPC 管线就断了，而且图集规格一旦调整，
+# 两边会静默错位。现在直接从 assets-source/cast/ 现场合成，规格由
+# cast_source.py 单一来源保证。
+NPC_CAST = ['ch_00', 'ch_01', 'ch_02', 'ch_04', 'ch_05', 'ch_07', 'ch_09']
+atlas16, _ = build_sheet(NPC_CAST, NPC_SRC_DIR)
+for ci in range(len(NPC_CAST)):
     base_x = (ci + 1) * 4 * TILE
     for f in range(4):
         for row in range(DIRS):
-            src = atlas16.crop(((sc * 4 + f) * 16, row * 16,
-                                (sc * 4 + f + 1) * 16, (row + 1) * 16))
+            src = atlas16.crop(((ci * 4 + f) * 16, row * 16,
+                                (ci * 4 + f + 1) * 16, (row + 1) * 16))
             atlas.paste(src.resize((TILE, TILE), Image.NEAREST),
                         (base_x + f * TILE, row * TILE))
 
-atlas.save('public/assets/chars/cast.png')
+os.makedirs(OUT_DIR, exist_ok=True)
+atlas.save(OUT_PNG)
 
 meta = {
     'tile': TILE, 'dirs': DIRS, 'frames': FRAMES,
-    'cast': ['kasumi_toyama'] + ['ch_%02d' % c for c in npc_src],
+    'cast': ['kasumi_toyama'] + NPC_CAST,
     'rows': ['down', 'up', 'left', 'right'],
     'license': ('hero: "kasumi-orange" sprite sheet from codex-pet.org '
                 '(author lincoco), used with permission; '
@@ -186,7 +226,8 @@ meta = {
     'note': ('hero = 户山香橙 (Kasumi Toyama, BanG Dream!) — '
              'codex-pet.org 素材；up 方向由 down 镜像压暗合成（原素材无背面帧）')
 }
-with open('public/assets/chars/cast.json', 'w', encoding='utf-8') as fp:
+# 元数据不进 public/：运行时没有任何 fetch/load 引用它
+with open(OUT_JSON, 'w', encoding='utf-8') as fp:
     json.dump(meta, fp, ensure_ascii=False, indent=2)
 
 # ---- 验证图1：上色预览 8x -----------------------------------------
@@ -214,9 +255,10 @@ for row in range(4):
                 q.paste(small.crop((xx, yy, xx + 3, yy + 3)), (xx, yy))
         sim.alpha_composite(q, (col * SIM_H, row * SIM_H))
 
-prev.convert('RGB').save('/tmp/kasumi_v2.png')
-sil.convert('RGB').save('/tmp/kasumi_sil.png')
-sim.convert('RGB').save('/tmp/kasumi_game.png')
+os.makedirs(PREVIEW_DIR, exist_ok=True)
+prev.convert('RGB').save(os.path.join(PREVIEW_DIR, 'kasumi_v2.png'))
+sil.convert('RGB').save(os.path.join(PREVIEW_DIR, 'kasumi_sil.png'))
+sim.convert('RGB').save(os.path.join(PREVIEW_DIR, 'kasumi_game.png'))
 
 # ---- 自检---------------------------------------------------------
 ok = True

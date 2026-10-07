@@ -33,7 +33,7 @@ import {
 import * as HD2D_GEN from './hd2dTextures.js';
 import { initHD2D } from './textures.js';
 import { createWater } from './water.js';
-import { createOutskirts } from './city.js';
+import { createOutskirts, exportBlockers } from './city.js';
 
 const HD2D = initHD2D(HD2D_GEN);
 
@@ -231,7 +231,41 @@ export function createScene() {
   // 核心区（|X| <= 50 且 Z < 40）保持原样，其余区域由程序化街区填充。
   scene.add(createOutskirts(WORLD, 50));
 
-  return { scene, sun, water, ground, SUN_OFFSET };
+  // 取走城区遮挡物列表，供相机避障与玩家碰撞使用
+  // （见 camera.js updateCamera 与 character.js 的碰撞处理）。
+  // 必须在 createOutskirts 之后调用 —— 列表是在生成房屋与树时累积的。
+  const blockers = exportBlockers();
+
+  // 核心区（手写的港口部分）不在 city.js 里生成，
+  // 它的固定物在这里补登记。
+  for (const b of coreBlockers()) blockers.push(b);
+
+  return { scene, sun, water, ground, blockers, SUN_OFFSET };
+}
+
+/**
+ * 核心区固定物的遮挡登记。
+ *
+ * 【为什么放在这里而不是 city.js】
+ * city.js 只负责程序化生成的城区；喷泉、灯塔这些是 scene.js 里
+ * 硬编码的港区陈设，坐标各不相同。硬要把它们塞进 city.js
+ * 会让「城区生成器」这个职责边界变得不干净。
+ *
+ * 数值必须与 createPlaza / createHarbor 里的坐标一一对应 ——
+ * 改坐标时不同步改这里，玩家就会撞空气或从喷泉里穿过去。
+ * 这是「同一事实写两遍」的固有代价，用注释明确标出对应关系。
+ */
+function coreBlockers() {
+  return [
+    // 喷泉：台座直径 8.8（半径 4.4），立柱总高约 6.3 —— 见 createPlaza
+    { minX: -4.4, maxX: 4.4, minZ: 8.1, maxZ: 16.9, top: 6.3, solid: true },
+    // 灯塔：西侧防波堤尽头，高约 11 —— 见 createHarbor
+    {
+      minX: WORLD.bounds.minX + 28, maxX: WORLD.bounds.minX + 32,
+      minZ: WORLD.shorelineZ - 14, maxZ: WORLD.shorelineZ - 10,
+      top: 11, solid: true
+    }
+  ];
 }
 
 /** 渐变天空穹顶 */

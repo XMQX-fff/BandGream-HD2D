@@ -80,12 +80,20 @@ const ANCHOR_Y = 0.5;
 /** 精灵中心的离地高度 = 身高 x 锚点比例，让脚底贴地 */
 const BASE_Y = SPRITE_WORLD_HEIGHT * ANCHOR_Y;
 
-/** 图集规格，必须与 tools/build_cast.py 的输出严格一致 */
+/** 图集规格，必须与 tools/import_kasumi_pet.py 的输出严格一致 */
 const DIRS = 4;
 const FRAMES = 4;
 const COLS_PER_CAST = FRAMES;
 
-/** 各角色调用的图集列（0..7，对应 cast.json 的 cast 顺序） */
+/**
+ * 各角色调用的图集列（0..7）。
+ *
+ * 顺序必须与构建脚本的 cast 列表严格一致
+ * （tools/import_kasumi_pet.py 的 NPC_CAST，规格记录在
+ * assets-source/cast.meta.json —— 注意该文件**运行时不会被加载**，
+ * 它只是给人看的构建元数据）。
+ * 改顺序时必须同步改图集，否则 NPC 会集体串色。
+ */
 const CAST_INDEX = {
   hero: 0,
   npcFisher: 1,
@@ -287,6 +295,72 @@ export function createCharacter(paletteKey = 'hero') {
   };
 
   /**
+   * 建筑碰撞体。由 main.js 注入（见 scene.js 的 blockers 列表）。
+   *
+   * 【为什么必须有碰撞 —— 这是「角色彻底看不见」的根本原因】
+   * 在加碰撞之前，hero.update 只用 WORLD.bounds 夹住坐标，
+   * 玩家可以**走进房子内部**。一旦走进房子：
+   *   · 相机的视线起点（角色 +Z 侧 34 单位）必然落在某栋房子里，
+   *   · 或者相机与角色之间隔着两堵墙，
+   *   · 无论怎么调避障参数都救不回来 ——
+   *     因为「玩家在墙里」这个状态本身就不该存在。
+   *
+   * 实测射线诊断（tools/diagnose_camera.py）在 (-30,120) 命中 7 个遮挡物，
+   * 其中包含玩家所在位置的建筑 —— 玩家正站在房子里。
+   *
+   * 【为什么只挡「solid」物体】
+   * 树也登记在 blockers 里（它们确实会挡视线），
+   * 但玩家应该能从树下走过，只是别让树把镜头挡住。
+   * 所以碰撞只取 solid = true 的项（房子、喷泉、灯塔）。
+   */
+  let solids = [];
+  const RADIUS = 1.1;   // 角色碰撞半径，约半身宽
+
+  /**
+   * 把角色推出所有实心建筑。
+   *
+   * 做法是「最小位移推出」：对每个与角色圆相交的盒子，
+   * 算出四面墙里最近的一面，把角色推到墙外。
+   *
+   * 【为什么不逐轴分离（先解 X 再解 Z）】
+   * 逐轴分离在贴墙滑动时会有「卡在墙角」的现象：
+   * 沿 X 推出后正好又被 Z 方向的另一面墙挡住，
+   * 玩家在墙角里反复抖动。这里每帧只推一次最小位移，
+   * 一次就能脱离，代价是偶尔会有一点点「贴墙感」，可以接受。
+   */
+  function resolveCollisions() {
+    for (let i = 0; i < solids.length; i++) {
+      const b = solids[i];
+      // 圆 vs AABB 的快速排除：角色中心到盒子的最近点
+      const nx = state.x < b.minX ? b.minX : (state.x > b.maxX ? b.maxX : state.x);
+      const nz = state.z < b.minZ ? b.minZ : (state.z > b.maxZ ? b.maxZ : state.z);
+      const dx = state.x - nx;
+      const dz = state.z - nz;
+      const d2 = dx * dx + dz * dz;
+      if (d2 >= RADIUS * RADIUS) continue;   // 没碰到
+
+      if (d2 > 1e-8) {
+        // 圆心在盒外：沿最近点方向推出
+        const d = Math.sqrt(d2);
+        const push = RADIUS - d;
+        state.x += (dx / d) * push;
+        state.z += (dz / d) * push;
+      } else {
+        // 圆心在盒内（已经穿墙）：推到最近的一条边外
+        const outL = state.x - b.minX;   // 往 -X 推的距离
+        const outR = b.maxX - state.x;   // 往 +X
+        const outB = state.z - b.minZ;   // 往 -Z
+        const outT = b.maxZ - state.z;   // 往 +Z
+        const m = Math.min(outL, outR, outB, outT);
+        if (m === outL) state.x = b.minX - RADIUS;
+        else if (m === outR) state.x = b.maxX + RADIUS;
+        else if (m === outB) state.z = b.minZ - RADIUS;
+        else state.z = b.maxZ + RADIUS;
+      }
+    }
+  }
+
+  /**
    * 摆阴影。
    *
    * createBlobShadow 把「偏离物体中心」烘在了 mesh.position 上（要按半径
@@ -322,6 +396,9 @@ export function createCharacter(paletteKey = 'hero') {
           state.z = Math.min(bounds.maxZ, Math.max(bounds.minZ, state.z));
         }
 
+        // 推出建筑 —— 必须在世界边界夹取之后，否则会被推出地图外
+        if (solids.length) resolveCollisions();
+
         state.dir = dirFromVector(dx, dz);
         // 行走帧循环：图集只有 4 帧，用相位偏移得到非零起点的步伐
         state.animTime += dt * 7.0;
@@ -338,10 +415,37 @@ export function createCharacter(paletteKey = 'hero') {
       return state.moving;
     },
 
+    /**
+     * 注入建筑碰撞体。
+     * @param {Array} list scene.js 的 blockers 列表
+     */
+    setColliders(list) {
+      solids = (list || []).filter((b) => b.solid);
+    },
+
+    /** 是否卡在某个实心体内（调试用：截图脚本可读取判断是否穿模） */
+    isStuck: () => {
+      for (let i = 0; i < solids.length; i++) {
+        const b = solids[i];
+        if (state.x > b.minX && state.x < b.maxX && state.z > b.minZ && state.z < b.maxZ) return true;
+      }
+      return false;
+    },
+
+    /**
+     * 瞬移（出生点 / 诊断脚本用）。
+     *
+     * 【也必须做碰撞推出】
+     * 诊断脚本（tools/diagnose_camera.py）用它把角色送到各个测试机位。
+     * 这里如果不推出，角色会直接落在房子内部 ——
+     * 而「玩家在墙里」正是本轮要修的核心问题。
+     * 调试入口若能绕过修复，测出来的结论必然是错的。
+     */
     setPosition(x, z) {
       state.x = x;
       state.z = z;
-      sprite.position.set(x, BASE_Y, z);
+      if (solids.length) resolveCollisions();
+      sprite.position.set(state.x, BASE_Y, state.z);
       placeShadow();
     },
 

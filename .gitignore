@@ -8,6 +8,15 @@ dist/
 *.log
 .vite/
 
-# 运行时调试产物
+# 开发期调试产物
+# preview/  —— 素材验证图（import_kasumi_pet.py 输出）
+# *.local   —— 本地覆盖配置
 preview/
 *.local
+
+# Python 字节码
+# tools/ 下有多个构建脚本，import_kasumi_pet.py 会 import cast_source，
+# 于是每次跑构建都在 tools/ 里生成 __pycache__/。
+# 它是纯派生文件，进版本库只会造成无意义的 diff 噪音。
+__pycache__/
+*.py[cod]

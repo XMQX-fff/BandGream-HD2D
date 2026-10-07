@@ -1,7 +1,7 @@
 /**
  * 入口：引导、渲染循环、resize
  */
-import { Vector3 } from 'three';
+import { Vector3, Raycaster } from 'three';
 import { createRenderer, createComposer, PIXEL_SIZE } from './core/renderer.js';
 import { createCamera, updateCamera, viewDistanceAlongForward, CAMERA_CONFIG, cameraFit } from './core/camera.js';
 import { createInput } from './core/input.js';
@@ -16,12 +16,27 @@ const loadingText = document.getElementById('loading-text');
 
 const renderer = createRenderer(canvas);
 const camera = createCamera();
-const { scene, sun, water, SUN_OFFSET } = createScene();
+const { scene, sun, water, blockers, SUN_OFFSET } = createScene();
+
+// 遮挡物列表（房子 + 树）同时交给两个消费方：
+//   相机 —— 视线避障，避免镜头穿墙 / 被树冠糊脸
+//   角色 —— 碰撞，防止玩家走进房子内部
+//
+// 【为什么必须是同一份列表】
+// 之前相机用的是 city.js 的 houseBounds（只有房子），
+// 角色则完全没有碰撞 —— 两个消费方拿到的是不一致的信息，
+// 于是出现「相机认为视线通畅、实际被树挡住」这类
+// 只有射线诊断才能发现的偏差。单一数据源消除这类不一致。
+camera.userData.blockers = blockers;
+
 const { composer, tiltShift } = createComposer(renderer, scene, camera);
 const input = createInput(window);
 
 // ---------- 角色 ----------
 const hero = createCharacter('hero');
+// 碰撞必须在 setPosition 之前注入 —— 出生点本身也要过碰撞，
+// 否则手滑改错坐标就会把角色塞进墙里，且没有任何报错。
+hero.setColliders(blockers);
 // 出生点 (6,14)：偏离喷泉中轴。
 //
 // 【为什么不放广场正中】斜俯视相机在角色正后方，角色永远处于
@@ -32,7 +47,7 @@ hero.setPosition(6.0, 14.0);
 scene.add(hero.sprite);
 scene.add(hero.shadow);
 
-// NPC（静态，做场景氛围）—— 每个 key 对应图集里的一列（见 cast.json）
+// NPC（静态，做场景氛围）—— 每个 key 对应图集里的一列（见 cast.meta.json）
 const npcs = [
   { key: 'npcFisher',  x: -8.5,  z: 1.0,  dir: 0 },
   { key: 'npcGuard',   x: 7.5,   z: 0.0,  dir: 3 },
@@ -44,6 +59,10 @@ const npcs = [
   { key: 'npcFisher',  x: 12.5,  z: -1.5, dir: 2 }
 ].map((cfg) => {
   const c = createCharacter(cfg.key);
+  // NPC 也注入碰撞：它们固定不动，setPosition 的推出逻辑
+  // 能保证「坐标写错时不会静默地把 NPC 塞进墙里」——
+  // 实测把 NPC 放在喷泉台上时，画面上就只剩一根柱子。
+  c.setColliders(blockers);
   c.setPosition(cfg.x, cfg.z);
   c.setDir(cfg.dir);
   scene.add(c.sprite);
@@ -53,17 +72,32 @@ const npcs = [
 
 // ---------- 静态合并 ----------
 // 在角色创建之后调用：角色精灵/影子带 dynamic 标记会被自动跳过。
-// 把上千个构件按材质合并成几十个 mesh，draw call 数量级下降。
-// 调试开关必须在 mergeStatics 之前定义
-const DEBUG_RAW = new URLSearchParams(location.search).get('debug') === 'raw';
-const DEBUG_NOAO = new URLSearchParams(location.search).get('debug') === 'noao';
+// 调试模式：?debug=raw 跳过全部后处理，?debug=noao 跳过顶点 AO，
+//?debug=nomerge 跳过静态合并（射线诊断用 —— 合并后整座城是一个
+// 巨型 mesh，射线只能知道「被合并体挡住」，无法定位是哪一个物体）。
+//
+// 【必须声明在 frame() 之前】
+// 之前这段在文件末尾用 const 声明，而 frame() 在首帧就读它——
+// const 有暂时性死区，首帧必然抛 ReferenceError: Cannot access 'DEBUG'
+// before initialization，整帧渲染直接挂掉，画面停在空白。
+const DEBUG = new URLSearchParams(location.search).get('debug');
+const DEBUG_RAW = DEBUG === 'raw';
+const DEBUG_NOAO = DEBUG === 'noao';
+const DEBUG_NOMERGE = DEBUG === 'nomerge';
 
-const mergeStats = mergeStatics(scene);
+if (DEBUG) console.warn(`[debug] ${DEBUG}：调试模式已启用`);
+
+// 把上千个构件按材质合并成几十个 mesh，draw call 数量级下降。
+const mergeStats = DEBUG_NOMERGE
+  ? { before: 0, after: 0, meshes: [] }
+  : mergeStatics(scene);
 
 // 顶点 AO 烘焙 —— 必须在合并之后做：
 // 合并器把世界变换烘进了顶点，AO 才能按最终世界坐标计算。
 // 放在合并之前只能拿到物体局部坐标，墙根高度会算错。
-const aoResult = (DEBUG_RAW || DEBUG_NOAO) ? { baked: 0, skipped: 0 } : bakeVertexAO(scene.children, {
+const aoResult = (DEBUG_RAW || DEBUG_NOAO || DEBUG_NOMERGE)
+  ? { baked: 0, skipped: 0 }
+  : bakeVertexAO(scene.children, {
   // 水面与天空穹顶不能烘 AO：它们的法线与高度都不参与遮蔽逻辑，
   // 强加会让水面出现整片灰暗。
   skip: (m) => !m.isMesh || m.name === 'water' || m.name === 'skydome'
@@ -148,12 +182,6 @@ function frame(now) {
 // ---------- 启动 ----------
 onResize();
 
-// 调试模式：?debug=raw 跳过全部后处理，?debug=nopix 跳过像素化
-const DEBUG = new URLSearchParams(location.search).get('debug');
-if (DEBUG === 'raw') {
-  console.warn('[debug] raw render: 跳过全部后处理');
-}
-
 // 贴图异步加载，等一帧渲染完成后再淡出 loading
 requestAnimationFrame(frame);
 
@@ -168,11 +196,19 @@ requestAnimationFrame(() => {
 window.__HD2D__ = {
   ready: true,
   pixelSize: PIXEL_SIZE,
+  // 暴露诊断脚本需要的构造器。
+  // 只给 Raycaster / Vector3 两个具名导入 —— 写成 `import * as THREE`
+  // 会把整个 three 命名空间钉死，tree-shaking 失效，产物直接翻几倍。
+  THREE: { Raycaster, Vector3 },
   mergeStats,
   drawables: () => countDrawables(scene),
   getState: () => ({
-    x: hero.state.x, z: hero.state.z, dir: hero.state.dir
+    x: hero.state.x, z: hero.state.z, dir: hero.state.dir,
+    // 卡在实心体内 = 穿模。诊断脚本据此判断碰撞是否生效。
+    stuck: hero.isStuck()
   }),
   setPlayerPos: (x, z) => hero.setPosition(x, z),
+  blockerCount: () => blockers.length,
+  solidCount: () => blockers.filter((b) => b.solid).length,
   camera, renderer, scene, composer
 };

@@ -129,10 +129,66 @@ const TRIM_MAT = (() => {
 
 // --------------------------------------------------------------------------
 //  细节分级
+//
+// 【不导出】这三个常量只在 city.js 内部使用（makeHouse 的材质分支、
+// lodAt 的距离判定、填充层的数量决策），src/ 下没有任何其他文件 import 它们。
+// 导出只会让人误以为存在外部调用方，实际是死 API。
 // --------------------------------------------------------------------------
-export const LOD_NEAR = 0;   // 完整：墙 + 屋顶 + 门窗 + 院子杂物
-export const LOD_MID  = 1;   // 中景：墙 + 屋顶，无门窗
-export const LOD_FAR  = 2;   // 远景：单一体块，偏雾色
+const LOD_NEAR = 0;   // 完整：墙 + 屋顶 + 门窗 + 院子杂物
+const LOD_MID  = 1;   // 中景：墙 + 屋顶，无门窗
+const LOD_FAR  = 2;   // 远景：单一体块，偏雾色
+
+// --------------------------------------------------------------------------
+//  遮挡物登记
+// --------------------------------------------------------------------------
+/**
+ * 场景中所有会遮挡「相机 → 角色」视线的物体的地面包围盒。
+ *
+ * 用途有两个（相机避障 + 玩家碰撞），所以登记的不只是房子。
+ *
+ * 【为什么必须包含树 —— 这是「角色明明在画面中央却看不见」的真凶】
+ * 最初这里只登记 makeHouse，理由是「房子才是高的东西」。
+ * 实测射线诊断（tools/diagnose_camera.py）的结论推翻了这个假设：
+ *
+ *   横街东口 (98,140)：相机高度 16.6 = 基准值，**避障完全没触发**，
+ *                      但射线仍被挡 2 次 —— 命中物是 Icosahedron，
+ *                      也就是 createTree 的树冠球。
+ *   城区西北 (-30,120)：命中物里同样有 Icosahedron。
+ *
+ * 树高 4.5~7.5，和房子（顶 6~11）处在同一量级，
+ * 而「相机在角色 +Z 侧 34 单位」这条视线上，
+ * 沿街种的一排树几乎必然横在其中。漏掉树，
+ * 避障逻辑就会算出一��「视线通畅」的结论，然后被现实打脸。
+ *
+ * 结论：凡是竖直方向能挡住视线的东西都要登记，缺一类就会出现一类 bug。
+ */
+const BLOCKERS = [];
+
+/**
+ * 登记一个遮挡物。
+ * @param {number} x @param {number} z 中心
+ * @param {number} w @param {number} d 地面尺寸
+ * @param {number} top 顶部高度
+ * @param {boolean} solid 是否阻挡玩家行走（树冠挡视线但不挡路，
+ *   房子两者都挡）。分开标记是因为「镜头要绕开」和「人能走过去」
+ *   是两个不同诉求：挡住视线的树该被相机躲开，但玩家可以从树下走过。
+ */
+function registerBlocker(x, z, w, d, top, solid) {
+  BLOCKERS.push({
+    minX: x - w / 2, maxX: x + w / 2,
+    minZ: z - d / 2, maxZ: z + d / 2,
+    top,
+    solid
+  });
+}
+
+/**
+ * 取走并清空遮挡物列表（每个场景只需调用一次）。
+ * @returns {Array<{minX:number,maxX:number,minZ:number,maxZ:number,top:number,solid:boolean}>}
+ */
+export function exportBlockers() {
+  return BLOCKERS.splice(0, BLOCKERS.length);
+}
 
 /**
  * 单栋房屋
@@ -216,6 +272,23 @@ function makeHouse(x, z, w, d, h, roofH, lod, faceSouth = true) {
   g.position.set(x, 0, z);
   // 轻微朝向偏转：整片房子绝对平行会读作「复制粘贴」
   g.rotation.y = rand(-0.08, 0.08);
+
+  // 登记到场景级列表，供相机避障与玩家碰撞查询。
+  // 【为什么需要】
+  // 相机固定在角色 +Z 侧 34 单位、高 16.6 处。
+  // 地图放大到 280×260 后街区密度很高，玩家在街区里走时，
+  // 相机很可能正好位于某栋房子内部 —— 实测在 (-30,120) 附近
+  // 相机穿进了建筑，画面被一堵墙完全遮住，角色看不见。
+  //
+  // 存的是**包围盒**而不是中心点：避障要判断「相机是否在盒内」，
+  // 中心点+半径的近似在长条形房屋上会算错。
+  //
+  // solid = true：房子既挡视线也挡路。玩家不能穿墙，
+  // 否则会走进房子内部，此时相机必然被四面墙围死。
+  //
+  // 这里累积到模块级数组，由 exportBlockers() 一次性取走，
+  // 避免把数组参数层层往下传。
+  registerBlocker(x, z, w, d, h + roofH, true);
   return g;
 }
 
@@ -459,9 +532,15 @@ export function createOutskirts(WORLD, coreHalf = 50) {
       const r = rng();
       if (r < 0.34) {
         // 树
-        const t = createTree({ h: rand(5, 7.5), spread: rand(2.2, 3.4), lod: z < 90 ? 0 : z < 190 ? 1 : 2 });
+        const h = rand(5, 7.5), spread = rand(2.2, 3.4);
+        const t = createTree({ h, spread, lod: z < 90 ? 0 : z < 190 ? 1 : 2 });
         t.position.set(x, 0, z);
         group.add(t);
+        // 【必须登记：树会挡视线】沿街一排树正好横在
+        // 「相机（角色 +Z 侧 34）→ 角色」的连线上。
+        // 树冠横向范围按 spread*1.6 取（最外侧球心在 ±0.6*spread，
+        // 半径 0.4*spread*0.95，留一点余量）。
+        registerBlocker(x, z, spread * 3.2, spread * 3.2, h, false);
       } else if (r < 0.62) {
         // 路灯
         const l = createLampPost();
@@ -499,9 +578,13 @@ export function createOutskirts(WORLD, coreHalf = 50) {
     if (Math.abs(x) < coreHalf && z < 40) continue;
     const tdist = Math.hypot(x, z - 60);
     const tlod = tdist < 90 ? 0 : tdist < 190 ? 1 : 2;
-    const t = createTree({ h: rand(4.5, 7), spread: rand(2, 3.2), lod: tlod });
+    const h = rand(4.5, 7), spread = rand(2, 3.2);
+    const t = createTree({ h, spread, lod: tlod });
     t.position.set(x, 0, z);
     group.add(t);
+    // 与沿街树同理：散树同样会横在视线上。
+    // solid = false —— 玩家可以从树下走过，只是别让树挡住镜头。
+    registerBlocker(x, z, spread * 3.2, spread * 3.2, h, false);
   }
 
   return group;

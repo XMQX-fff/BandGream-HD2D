@@ -34,7 +34,7 @@ import {
 import * as HD2D_GEN from './hd2dTextures.js';
 import { initHD2D } from './textures.js';
 import { createWater } from './water.js';
-import { createOutskirts, exportBlockers } from './city.js';
+import { createOutskirts, exportBlockers, exportTags } from './city.js';
 
 const HD2D = initHD2D(HD2D_GEN);
 
@@ -236,6 +236,9 @@ export function createScene() {
   // （见 camera.js updateCamera 与 character.js 的碰撞处理）。
   // 必须在 createOutskirts 之后调用 —— 列表是在生成房屋与树时累积的。
   const blockers = exportBlockers();
+  // 建筑类型标签：诊断工具靠它统计「9 种类型各出现多少」。
+  // 必须在 createOutskirts 之后取（同 blockers，见上一行注释）。
+  const buildingTags = exportTags();
 
   // 自动收集散落道具的遮挡体积。
   // 灯柱、木桶堆、长椅这些在 props.js 里用 userData.sight 自我声明，
@@ -246,7 +249,7 @@ export function createScene() {
   // 剩下两个体量太大、不能靠自身节点声明的固定物，在这里显式登记。
   for (const b of coreBlockers()) blockers.push(b);
 
-  return { scene, sun, water, ground, blockers, SUN_OFFSET };
+  return { scene, sun, water, ground, blockers, buildingTags, SUN_OFFSET };
 }
 
 /**

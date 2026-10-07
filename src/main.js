@@ -16,7 +16,7 @@ const loadingText = document.getElementById('loading-text');
 
 const renderer = createRenderer(canvas);
 const camera = createCamera();
-const { scene, sun, water, blockers, SUN_OFFSET } = createScene();
+const { scene, sun, water, blockers, buildingTags, SUN_OFFSET } = createScene();
 
 // 遮挡物列表（房子 + 树）同时交给两个消费方：
 //   相机 —— 视线避障，避免镜头穿墙 / 被树冠糊脸
@@ -124,6 +124,14 @@ window.addEventListener('resize', onResize);
 let last = null;
 const playerPos = new Vector3();
 
+/**
+ * 俯角环形缓冲（见 frame() 内的说明）。
+ * 只在诊断脚本主动索取时才分配 —— 正常游玩不需要它。
+ */
+let pitchLog = null;
+let pitchIdx = 0;
+let PITCH_LOG = 0;
+
 function frame(now) {
   requestAnimationFrame(frame);
   const t = now / 1000;
@@ -161,6 +169,23 @@ function frame(now) {
 
   // 相机跟随
   updateCamera(camera, hero.state.x, 0, hero.state.z, dt);
+
+  // 俯角时间序列 —— 供 tools/pitch_test.py 读取。
+  //
+  // 【为什么必须逐帧记录，不能只暴露「当前俯角」】
+  // 「镜头跳变」是帧与帧之间的现象：相机在 24.6° 与 48.1° 之间反复切换。
+  // 任何只读「某一瞬间俯角」的诊断都测不到它——
+  // 读到多少完全取决于你在跳变的哪个相位上采样，
+  // 而静态机位测试（每点等 15 秒收敛后读一次）更是恒定读到一个稳定值。
+  // 只有把每一帧的俯角排成时间序列，才能算出摆幅与跳变频率。
+  //
+  // 环形缓冲：固定长度覆盖最近约 4 秒（60fps × 240），
+  // 诊断脚本读它就得到连续信号。开销是每帧一次 Math.atan2，可忽略。
+  if (PITCH_LOG) {
+    pitchLog[pitchIdx] = Math.atan2(camera.position.y - 1.2,
+      Math.max(0.001, camera.position.z - hero.state.z)) * 180 / Math.PI;
+    pitchIdx = (pitchIdx + 1) % PITCH_LOG;
+  }
 
   // 水面动画
   if (water.userData.update) water.userData.update(t);
@@ -208,11 +233,93 @@ window.__HD2D__ = {
     stuck: hero.isStuck()
   }),
   setPlayerPos: (x, z) => hero.setPosition(x, z),
+  /**
+   * 只改朝向、不改位置。截图脚本用。
+   * 【为什么需要单独一个接口】dir 是 0~3 的方向枚举,只在 character.js 的
+   * move() 里由移动向量推导。之前只能「边走边转」,截图脚本要么走一段路
+   * (位置就偏了,拍不到目标机位),要么直接改内部 state(那是作弊,绕过封装)。
+   *所以在调试钩子里补一个显式 setter,取值与 dirFromVector 完全一致:
+   *   0=南(+z) 1=北(-z) 2=西(-x) 3=东(+x)
+   */
+  faceTo: (deg) => {
+    const a = ((deg % 360) + 360) % 360;
+    hero.state.dir = [0, 3, 1, 2][Math.round(a / 90) % 4];
+    return hero.state.dir;
+  },
   // 遮挡物列表本身也要给：诊断脚本要算「角色离最近实心建筑多远」，
   // 光给个长度是算不出来的（之前 walk_test.py 读 H.blockers 拿到 undefined，
   // nearWall 一路报 999，看着像贴墙很远，其实是数据根本没送到）。
   blockers,
+  // 建筑类型标签：{key, x, z, depth, top, zone}。
+  // city_report.py 靠它统计类型分布 —— 不能靠 blockers 的几何反推，
+  // 带院/出挑会让反推全错（见 buildingTypes.js 的 tagBuilding 注释）。
+  buildingTags,
   blockerCount: () => blockers.length,
   solidCount: () => blockers.filter((b) => b.solid).length,
-  camera, renderer, scene, composer
+  /**
+   * 取俯角时间序列（最近 N 帧，按时间顺序）。
+   * 传 N 可临时开/关记录 —— 见 frame() 内PITCH_LOG 的说明。
+   */
+  pitchSeries: (n = 240) => {
+    if (!PITCH_LOG || n !== PITCH_LOG) {
+      PITCH_LOG = n;
+      pitchLog = new Float32Array(n);
+      pitchIdx = 0;
+    }
+    // 环形缓冲展开成时间顺序
+    const out = [];
+    for (let i = 0; i < PITCH_LOG; i++) {
+      out.push(pitchLog[(pitchIdx + i) % PITCH_LOG]);
+    }
+    return out;
+  },
+  camera, renderer, scene, composer,
+  /**
+   * 诊断：列出「当前把视线挡住的盒子」。
+   *
+   * 【为什么需要】
+   * 俯角仍会冲到 50°，说明第 0 阶段（横移+缩距）在某处解不出解，
+   * 于是落到抬升兜底。但**是哪几个盒子逼出来的**光看俯角看不出来 ——
+   * 可能是单个巨型仓库，也可能是三栋房子叠成一道墙。
+   * 这两种情况的解法完全不同：前者要加宽横移，后者要拉长横移方向。
+   *
+   * 返回每个挡路盒子的中心/尺寸/距离相机多远，按距离排序。
+   */
+  sightBlockers: () => {
+    const s = hero.state;
+    const cx = camera.position.x;
+    const cz = camera.position.z;
+    const cy = camera.position.y;
+    const out = [];
+    for (const b of blockers) {
+      // 视线是「相机 → 角色」的线段，不是 XZ 平面上的矩形。
+      // 参数化：t=0 在相机，t=1 在角色。
+      //   x(t) = cx + (s.x - cx)·t
+      //   z(t) = cz + (s.z - cz)·t
+      //   y(t) = cy + (1.2 - cy)·t
+      // 盒子在 Z 区间 [minZ,maxZ] 上对应的 t 区间：
+      const ez = cz - s.z;
+      if (Math.abs(ez) < 1e-3) continue;
+      const t0 = (cz - b.maxZ) / ez;
+      const t1 = (cz - b.minZ) / ez;
+      const tEnter = Math.max(0, Math.min(1, Math.min(t0, t1)));
+      const tExit = Math.max(0, Math.min(1, Math.max(t0, t1)));
+      if (tEnter > tExit) continue;
+      // X 也要落在盒内（与 camera.js 的 sightGap 同款判据）
+      const xIn = cx + (s.x - cx) * tEnter;
+      const xOut = cx + (s.x - cx) * tExit;
+      if (Math.max(xIn, xOut) < b.minX || Math.min(xIn, xOut) > b.maxX) continue;
+      // 视线在 tExit 处最低，那才是瓶颈（camera.js 里踩过这个坑）
+      const rayY = cy + (1.2 - cy) * tExit;
+      if (rayY > b.top) continue;
+      out.push({
+        cx: (b.minX + b.maxX) / 2, cz: (b.minZ + b.maxZ) / 2,
+        w: b.maxX - b.minX, d: b.maxZ - b.minZ, top: b.top,
+        tExit, rayY,
+        dist: Math.hypot((b.minX + b.maxX) / 2 - s.x, (b.minZ + b.maxZ) / 2 - s.z)
+      });
+    }
+    out.sort((p, q) => p.dist - q.dist);
+    return { camX: cx, camY: cy, camZ: cz, heroX: s.x, heroZ: s.z, list: out.slice(0, 8) };
+  }
 };

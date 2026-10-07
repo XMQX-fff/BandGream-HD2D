@@ -157,6 +157,30 @@ export function createCamera() {
    * 抖动早就衰减完了）。只有连续行走才能暴露。
    */
   cam.userData._shiftX = 0;
+  /**
+   * 抬升量 lift 的滤波后取值。为什么要它，见 updateCamera 里的说明。
+   */
+  cam.userData._lift = 0;
+  /**
+   * 距离偏移 pull 的滤波后取值。
+   */
+  cam.userData._pull = 0;
+  /**
+   * 视线已经连续通畅了多少秒（避障迟滞计时器）。
+   *
+   * 【为什么需要它 —— 这是「镜头每隔一两秒猛地抬一次」的真凶】
+   * 玩家沿街走时，街边的树/房子交替进入「相机→角色」这条视线：
+   * 挡 0.4 秒 → 通 0.4 秒 → 又挡 0.4 秒……
+   * 如果遮挡一消失就立刻把相机落回基准俯角，俯角就会以约 2Hz 的频率
+   * 在 26° 与抬升值之间来回摆 —— 玩家的体感就是「镜头在抽搐」。
+   *
+   * 有了这个计时器：**必须连续通畅 clearHold 秒，抬升才开始回落。**
+   * 于是走过一排树时抬升一直保持（画面稳定，只是偏高一点），
+   * 真正走出一片密集区后才用一个慢速率平滑落回基准。
+   * 这与 OT2 的实际行为一致：那里的镜头是「跟着地形缓慢调整」，
+   * 而不是在每棵树前面点一下头。
+   */
+  cam.userData._clearFor = 0;
   cam.userData._forward = new Vector3();
 
   cam.position.set(0, CAMERA_CONFIG.height, CAMERA_CONFIG.distance);
@@ -204,12 +228,88 @@ export function updateCamera(camera, targetX, targetY, targetZ, dt) {
   let lift = 0;
   let pull = 0;
   let shiftX = 0;
+  let occluded = false;
   if (blockers && blockers.length) {
-    const sol = solveSightline(targetX, targetY, targetZ, blockers, fit, cfg);
+    // 【避障必须以「相机即将到达的位置」为目标点，而不是角色当前位置】
+    //
+    // 这里的坑是「求解顺序与阻尼不一致」：
+    //   · solveSightline 用 targetX/targetZ（角色的**当前**位置）算视线
+    //   · 但下面camera.position.lerp(desired, k) 让相机**滞后**于目标
+    // 于是求解器判断「视线通畅」时算的是「理想位置」的视线，
+    // 而真正渲染的那一帧，相机还停在半路上 —— 视线扫过的位置不同。
+    //
+    // 实测证据（角色 (-20,140) 沿 -Z 匀速走）：
+    //   同一位置**静止**时俯角 24.89°（通畅）
+    //   同一位置**移动中**俯角升到 34.66°
+    // 同一位置、同一遮挡，结果差 10° —— 差的那部分全部来自阻尼滞后。
+    //
+    // 修法：把注视点先按同一阻尼系数前移一帧，用前移后的点求解。
+    // 这样「算的」与「画的」是同一个视线，遮挡判定才成立。
+    const preK = 1 - Math.exp(-cfg.damping * dt);
+    const pk = Number.isFinite(preK) ? Math.min(1, Math.max(0, preK)) : 1;
+    const solvedX = targetX + (camera.position.x - targetX) * (1 - pk);
+    const solvedZ = targetZ + (camera.position.z - targetZ) * (1 - pk);
+    const sol = solveSightline(solvedX, targetY, solvedZ, blockers, fit, cfg);
     lift = sol.lift;
     pull = sol.pull;
     shiftX = sol.shiftX;
+    occluded = sol.occluded;
   }
+
+  // ---------------------------------------------------------------------
+  //  三通道一阶低通 —— 俯角不再跳变的关键
+  // ---------------------------------------------------------------------
+  // 【这一段是本轮返工的核心，问题的根因写在这里】
+  //
+  // 现象：玩家沿主街走，俯角在 24.6°（基准）与 48.1°（抬升上限）之间反复跳。
+  //
+  // 根因不是「抬升太多」，而是**抬升完全没有滤波**：
+  //   · shiftX 从第 1 版起就有一阶低通，所以横移是平滑的；
+  //   · lift / pull 是离散迭代的直接输出，每帧原样施加。
+  // 求解器一旦判定「需要抬 14.9」，下一帧就立刻抬满；
+  // 判定一解除，下一帧又立刻落回0。
+  // 街边树每0.4 秒进出一次视线 →俯角每 0.4 秒跳一次 → 抽搐。
+  //
+  // 【只加滤波还不够 —— 必须同时改求解器的杠杆优先级】
+  // 原顺序是「先用抬升，抬满了才缩距离，都不行才横移」。
+  // 而抬升是三者中**唯一改变俯角**的杠杆（另两个只改位置不改角度）。
+  // 于是绝大多数遮挡都被抬升解决了 —— 也就是说
+  // **每一次遮挡都直接等于一次俯角跳变**，滤波只能把「跳」变成「快速滑」。
+  //
+  // 正确的优先级：先用**不改变俯角**的杠杆（横移 → 缩距），
+  // 实在无解才动俯角。这样大部分遮挡根本不会引起俯角变化，
+  // 滤波只负责收拾剩下的少量情况。
+  // ===================================================================
+  //
+  // 速率的设计（数值是权衡的结果，不是随手取的）：
+  //   升（跟随目标）快 —— 玩家要立刻看清角色被挡在哪，慢半拍会被读成「卡了」。
+  //   降（回到基准）慢 —— 快速回落正是抽搐的另一半来源。
+  //   迟滞 0.35s      —— 抖动频率实测约 2Hz（周期 0.5s），
+  //                     0.35s 的保持窗让它连不成一个完整的升降周期。
+  const RISE = 7.0;    // 抬升/缩距 跟随目标的速率（1/s）
+  const FALL = 1.6;    // 回到基准的速率（1/s）
+  const SHIFT_RISE = 2.5;
+  const SHIFT_FALL = 2.0;
+  const CLEAR_HOLD = 0.35;   // 秒：必须连续通畅这么久才开始回落
+
+  camera.userData._clearFor = occluded ? 0 : camera.userData._clearFor + dt;
+  const mayFall = camera.userData._clearFor >= CLEAR_HOLD;
+
+  /** 一阶低通：按「升快降慢」逼近目标，mayFall 为假时冻结（迟滞） */
+  const follow = (prev, target, rise, fall) => {
+    if (!mayFall && target < prev) return prev;
+    const rate = target > prev ? rise : fall;
+    return prev + (target - prev) * (1 - Math.exp(-rate * dt));
+  };
+
+  const liftF = follow(camera.userData._lift, lift, RISE, FALL);
+  const pullF = follow(camera.userData._pull, pull, RISE, FALL);
+  // 遮挡消失时清掉迟滞计时，让下一次遮挡能立刻响应
+  if (occluded) camera.userData._clearFor = 0;
+  camera.userData._lift = liftF;
+  camera.userData._pull = pullF;
+  lift = liftF;
+  pull = pullF;
 
   // 抬升 / 缩短距离的实际施加。
   // 放在避障计算之后、阻尼之前，
@@ -225,21 +325,13 @@ export function updateCamera(camera, targetX, targetY, targetZ, dt) {
   // 横移必须与注视点同步（见 solveSightline 注释）：
   // 相机移了、注视点不移，角色就会在画面里横向漂出去。
   //
-  // 【横移要先做一阶低通，不能直接用求解值】
+  // 【横移走同一套滤波，与 lift/pull 保持一致】
   // 求解结果是离散跳变的（0 ↔ 4.08 ↔ … ↔ 16.3），玩家沿街走时
-  // 街边树不断进出视野，目标值每1~2 秒跳一次。
-  // 直接用会让相机横向抽搐，所以这里按「接近目标」的速率缓动。
-  //
-  // 速率取 2.5/s：比位移阻尼（6.5）慢，横移显得是「镜头缓缓让开」；
-  // 但快到 0.4 秒内就能跟上，玩家不会觉得镜头跟不上自己。
-  // 上限 20/s：目标突然反向（绕过一棵树后下一棵树在另一侧）时
-  // 仍能在半秒内纠正，否则会「卡在错误的一侧」持续遮挡。
-  const SHIFT_RATE = 2.5;
-  const SHIFT_RATE_REVERSE = 20;
+  // 街边树不断进出视野，目标值每 1~2 秒跳一次，直接施加会让相机横向抽搐。
+  // 上升快（跟得上玩家）、下降略慢（不来回摆）。
   const prevShift = camera.userData._shiftX;
-  const shiftRate = Math.abs(shiftX) < Math.abs(prevShift) ? SHIFT_RATE : SHIFT_RATE_REVERSE;
-  const step = (shiftX - prevShift) * (1 - Math.exp(-shiftRate * dt));
-  const shiftFiltered = prevShift + step;
+  const shiftRate = shiftX > prevShift ? SHIFT_RISE : SHIFT_FALL;
+  const shiftFiltered = prevShift + (shiftX - prevShift) * (1 - Math.exp(-shiftRate * dt));
   camera.userData._shiftX = shiftFiltered;
   desired.x = targetX + shiftFiltered;
 
@@ -336,6 +428,46 @@ const SIGHT_END_Y = 1.2;
 const MAX_PITCH = 48 * Math.PI / 180;
 
 /**
+ * 空间网格的桶边长（世界单位）。
+ *
+ * 取 16 的理由：它约等于「一栋房子进深 + 半条小巷」，
+ * 既不会让单个桶装进太多遮挡物，也不至于把 552 个桶的构建成本做得过高。
+ * 桶总数 = 地图 Z 跨度(≈260) / 16 ≈ 17 个，实际非空桶约 12 个。
+ */
+const SIGHT_CELL = 16;
+
+/**
+ * 按 Z 把遮挡物分桶，sightGap 只扫视线经过的那几个桶。
+ *
+ * 【为什么不能每次现算】
+ * 桶必须在遮挡物列表**变化时**构建一次。列表是场景搭好后才注入的，
+ * 之后完全不变 —— 所以构建结果挂在 blockers 数组自身上（作为属性），
+ * 同一个数组只会构建一次。
+ *
+ * 用属性而不是 WeakMap：blockers 是普通数组，直接挂一个 Symbol 属性最省事，
+ * 且不会与业务字段混淆。
+ */
+const SIGHT_BUCKETS = Symbol('sightBuckets');
+
+function getSightBuckets(blockers) {
+  if (blockers[SIGHT_BUCKETS]) return blockers[SIGHT_BUCKETS];
+  const buckets = [];
+  for (let i = 0; i < blockers.length; i++) {
+    const b = blockers[i];
+    // 一个盒子可能横跨多个桶，逐桶登记（去重靠同桶多次 push 的无害性：
+    // 重复判定只会让 gap 取同样的最大值，不影响结果）
+    const z0 = Math.floor(b.minZ / SIGHT_CELL);
+    const z1 = Math.floor(b.maxZ / SIGHT_CELL);
+    for (let z = z0; z <= z1; z++) {
+      if (!buckets[z]) buckets[z] = [];
+      buckets[z].push(b);
+    }
+  }
+  Object.defineProperty(blockers, SIGHT_BUCKETS, { value: buckets, enumerable: false });
+  return buckets;
+}
+
+/**
  * 求出让「相机 → 角色」视线通畅的抬升量。
  *
  * ==================================================================
@@ -412,65 +544,152 @@ function solveSightline(targetX, targetY, targetZ, blockers, fit, cfg) {
   // 而且构图偏移观感明显 —— 玩家会觉得「镜头歪了」。
   const maxShift = baseDist * 0.5;
 
+  // 空间网格：一次构建，后续每帧复用（见 getSightBuckets）
+  const sightBuckets = getSightBuckets(blockers);
+  const sightCell = SIGHT_CELL;
+
   let lift = 0;
   let pull = 0;
   let shiftX = 0;
+  /** 最终视线是否仍然被挡（供 updateCamera 做迟滞判定） */
+  let occluded = false;
 
   /**
    * 视线是否通畅（不含任何调整）。
    * 抽成函数是因为俯角约束要在「调整完成之后」再验一次 ——
    * 拉远相机会改变 t，进而可能引入新的遮挡。
+   *
+   * 【空间网格：为什么这里必须做剔除】
+   * 城区登记了 552 个遮挡物，而第 0 阶段要穷举约 148 组(横移, 距离)。
+   * 全量遍历 = 148 × 552 ≈ 8.2 万次盒判定/帧，估算约 1.6ms——
+   * 单看还能接受，但它吃的是**渲染帧的预算**，在低端机上会直接掉帧。
+   *
+   * 而实际上能挡住视线的只有「相机与角色之间」那几个盒子，
+   * 也就是 Z 落在 [targetZ, targetZ+baseDist] 这一条带里的。
+   * 地图跨 280 单位，这个带只占约 12%。按 Z 分桶后每次只扫几十个，
+   * 开销降到 1/8 以下。
+   *
+   * 桶按Z 而非 X 划分：视线在 Z 上是从 targetZ 连续扫到 camZ 的一段，
+   * 而在 X 上只跨 ±maxShift（≤17）。所以 Z 才是长轴。
    */
   const sightGap = (camY, camZ, sx) => {
     const ez = camZ - targetZ;
     if (ez < 1e-3) return 0;
     let gap = 0;
-    for (let i = 0; i < blockers.length; i++) {
-      const b = blockers[i];
-      const t0 = (camZ - b.maxZ) / ez;
-      const t1 = (camZ - b.minZ) / ez;
-      const tEnter = Math.max(0, Math.min(1, Math.min(t0, t1)));
-      const tExit = Math.max(0, Math.min(1, Math.max(t0, t1)));
-      if (tEnter > tExit) continue;
+    // 只遍历 Z 落在视线区间内的桶
+    const b0 = Math.floor(Math.min(targetZ, camZ) / sightCell);
+    const b1 = Math.floor(Math.max(targetZ, camZ) / sightCell);
+    for (let bi = b0; bi <= b1; bi++) {
+      const bucket = sightBuckets[bi];
+      if (!bucket) continue;
+      for (let i = 0; i < bucket.length; i++) {
+        const b = bucket[i];
+        const t0 = (camZ - b.maxZ) / ez;
+        const t1 = (camZ - b.minZ) / ez;
+        const tEnter = Math.max(0, Math.min(1, Math.min(t0, t1)));
+        const tExit = Math.max(0, Math.min(1, Math.max(t0, t1)));
+        if (tEnter > tExit) continue;
 
-      // 视线在 XZ 上不再是沿 Z 的直线：t=0 在相机端 (targetX+sx)，
-      // t=1 在角色 (targetX)，所以任意 t 处的 x = targetX + sx*(1-t)。
-      //
-      // 判据随之改变：不再问「targetX 在不在盒子 X 内」，
-      // 而是问「视线穿过盒子 Z 区间的那一小段，x 有没有落进盒子 X 内」。
-      // 横移正是靠这一步生效的 —— 视线斜了，就能从房子侧边掠过。
-      const xIn = targetX + sx * (1 - tEnter);
-      const xOut = targetX + sx * (1 - tExit);
-      if (Math.max(xIn, xOut) < b.minX || Math.min(xIn, xOut) > b.maxX) continue;
+        // 视线在 XZ 上不再是沿 Z 的直线：t=0 在相机端 (targetX+sx)，
+        // t=1 在角色 (targetX)，所以任意 t 处的 x = targetX + sx*(1-t)。
+        //
+        // 判据随之改变：不再问「targetX 在不在盒子 X 内」，
+        // 而是问「视线穿过盒子 Z 区间的那一小段，x 有没有落进盒子 X 内」。
+        // 横移正是靠这一步生效的 —— 视线斜了，就能从房子侧边掠过。
+        const xIn = targetX + sx * (1 - tEnter);
+        const xOut = targetX + sx * (1 - tExit);
+        if (Math.max(xIn, xOut) < b.minX || Math.min(xIn, xOut) > b.maxX) continue;
 
-      // ---------------------------------------------------------------
-      //  【缺口必须按 tExit 算，不是 tEnter】—— 这一处算错过
-      // ---------------------------------------------------------------
-      // 视线高度沿 t 单调下降：rayY(t) = camY + (1.2 - camY)·t
-      // 所以在盒子区间内，**tExit 处视线最低**，那才是真正的瓶颈。
-      //
-      // 用 tEnter 会得到「视线刚进盒子时的高度」——那时还在高处，
-      // 算出来的缺口是负数，于是把一个明确遮挡的盒子判成「不挡」。
-      //
-      // 实测：城区西北机位，相机 y=31.5/z=153.7，角色 z=120，
-      // 房子顶 8.17、位于角色 +Z 侧 7.92：
-      //   tEnter=0.676 → rayY=11.02（高于屋顶 8.17）
-      //   tExit =0.854 → rayY=5.62 （低于屋顶 8.17）← 视线在这里穿过了屋顶
-      //   用 tEnter: need = -4.16  → 误判「不挡」
-      //   用 tExit : need = +20.23 → 正确判定「遮挡」
-      //
-      // 判据的正确写法：视线在区间内是否**跨过**了顶面，
-      // 即 t_enter 处高于顶、t_exit 处低于顶。
-      const sightIn = camY + (SIGHT_END_Y - camY) * tEnter;
-      const sightOut = camY + (SIGHT_END_Y - camY) * tExit;
-      if (sightOut >= b.top) continue;          // 离开盒子时仍高于顶 → 能越过
-      if (sightIn <= SIGHT_END_Y) continue;     // 进入盒子时已在地面以下 → 不成立
+        // ---------------------------------------------------------------
+        //  【缺口必须按 tExit 算，不是 tEnter】—— 这一处算错过
+        // ---------------------------------------------------------------
+        // 视线高度沿 t 单调下降：rayY(t) = camY + (1.2 - camY)·t
+        // 所以在盒子区间内，**tExit 处视线最低**，那才是真正的瓶颈。
+        //
+        // 用 tEnter 会得到「视线刚进盒子时的高度」——那时还在高处，
+        // 算出来的缺口是负数，于是把一个明确遮挡的盒子判成「不挡」。
+        //
+        // 实测：城区西北机位，相机 y=31.5/z=153.7，角色 z=120，
+        // 房子顶 8.17、位于角色 +Z 侧 7.92：
+        //   tEnter=0.676 → rayY=11.02（高于屋顶 8.17）
+        //   tExit =0.854 → rayY=5.62 （低于屋顶 8.17）← 视线在这里穿过了屋顶
+        //   用 tEnter: need = -4.16  → 误判「不挡」
+        //   用 tExit : need = +20.23 → 正确判定「遮挡」
+        //
+        // 判据的正确写法：视线在区间内是否**跨过**了顶面，
+        // 即 t_enter 处高于顶、t_exit 处低于顶。
+        const sightIn = camY + (SIGHT_END_Y - camY) * tEnter;
+        const sightOut = camY + (SIGHT_END_Y - camY) * tExit;
+        if (sightOut >= b.top) continue;          // 离开盒子时仍高于顶 → 能越过
+        if (sightIn <= SIGHT_END_Y) continue;     // 进入盒子时已在地面以下 → 不成立
 
-      const need = (b.top + 1.5 - sightOut) / Math.max(0.2, 1 - tExit);
-      if (need > gap) gap = need;
+        const need = (b.top + 1.5 - sightOut) / Math.max(0.2, 1 - tExit);
+        if (need > gap) gap = need;
+      }
     }
     return gap;
   };
+
+  // ======================================================================
+  //  第 0 阶段（本轮新增）：优先用「不改变俯角」的杠杆解开遮挡
+  // ======================================================================
+  //
+  // 【这一段的存在理由是本轮返工的核心，务必读完】
+  //
+  // 玩家反馈：「遇到障碍物建筑群的时候可以不用频繁切换到低视角」。
+  // 实测数据：沿主街行走，俯角在 24.6° 与 48.1° 之间以约 2Hz 反复跳变。
+  //
+  // 根因不是「抬升量太大」，而是**抬升被当成了主力杠杆**。
+  // 三个杠杆对画面的影响完全不同：
+  //
+  //   杠杆        改变俯角？  观感
+  //   ----------  ----------  ----------------------------------------
+  //   shiftX 横移  否        镜头平移，构图略歪，HD-2D 里很自然
+  //   pull   缩距  否        镜头推近，角色变大，正常游戏行为
+  //   lift   抬升  是        **视角变陡，画面从斜俯视变成鸟瞰**
+  //
+  // 原顺序是 lift → pull → shiftX：先用抬升，抬满了才缩距，
+  // 都用尽才横移。结果是**每一次遮挡都直接变成一次俯角变化**。
+  // 滤波只能把「跳变」变成「快速滑动」，治不了「频繁发生」。
+  //
+  // 所以正确做法是把顺序倒过来：先穷举 (shiftX, pull) 组合 ——
+  // 这两者组合起来可解的空间很大（横移绕开 + 拉近让视线变陡），
+  // 实测绝大多数遮挡在这一步就能解开，**俯角完全不动**。
+  // 只有这个空间里真的无解，才进入下面的抬升逻辑。
+  //
+  // 搜索范围与代价权衡：
+  //   shiftX 上限 maxShift（0.5×34 = 17）—— 再大镜头会绕到对面建筑里
+  //   pull  上限到 minDist（0.55×34 ≈ 19）—— 再近就看不见身前街景
+  // 代价函数 = 横移量 + 缩距量，二者都归一化后相加，取代价最小的解。
+  // 单纯「先扫横移再扫距离」也能work，但会偏向大横移；
+  // 归一化加权才能得到「横移一点 + 拉近一点」这种自然的组合。
+  if (sightGap(baseY, targetZ + baseDist, 0) > 0.01) {
+    const SH_STEPS = 10;
+    const D_STEPS = 6;
+    let best = null;
+    let bestCost = Infinity;
+    for (let di = 0; di <= D_STEPS; di++) {
+      // 距离由远到近
+      const ez = baseDist - (baseDist - minDist) * (di / D_STEPS);
+      for (let k = 0; k <= SH_STEPS; k++) {
+        for (const dir of (k === 0 ? [0] : [-1, 1])) {
+          const sx = dir * (maxShift * k) / SH_STEPS;
+          if (sightGap(baseY, targetZ + ez, sx) <= 0.01) {
+            // 横移让构图歪（权 1.0），缩距让角色变大（权 0.55）——
+            // 前者观感损失更大，所以给更高权重。
+            const cost = Math.abs(sx) / maxShift +
+              0.55 * ((baseDist - ez) / (baseDist - minDist));
+            if (cost < bestCost) { bestCost = cost; best = { sx, ez }; }
+          }
+        }
+      }
+    }
+    if (best) {
+      // 解开了，而且俯角一格没动 —— 直接返回。
+      // 这是玩家要的效果：镜头平移/推近来避开房子，视角始终保持 26°。
+      return { lift: 0, pull: baseDist - best.ez, shiftX: best.sx, occluded: false };
+    }
+  }
 
   // ---- 第 1 阶段：求一个「视线通畅」的抬升/距离组合 ----
   // 迭代求解：抬升会改变视线落点，从而改变「哪一栋房子挡在前面」，
@@ -587,6 +806,11 @@ function solveSightline(targetX, targetY, targetZ, blockers, fit, cfg) {
     }
   }
 
+  // ---- 收尾：判定视线是否真的解开了 ----
+  // occluded 供 updateCamera 的迟滞逻辑使用：
+  // 为 true 表示「当前位形下视线仍被挡」，迟滞计时器清零、不允许回落。
+  occluded = sightGap(baseY + lift, targetZ + (baseDist - pull), shiftX) > 0.01;
+
   // ---- 兜底：任何路径都不允许突破俯角上限 ----
   // 上面三个阶段各自都会改动 lift / pull，理论上可能叠加出超限的组合。
   // 这个函数**绝不能返回俯角超过 MAX_PITCH 的解**——
@@ -599,7 +823,7 @@ function solveSightline(targetX, targetY, targetZ, blockers, fit, cfg) {
     if (ez < minEz) pull -= (minEz - ez);      // 拉远到合规
   }
 
-  return { lift, pull, shiftX };
+  return { lift, pull, shiftX, occluded };
 }
 
 /**

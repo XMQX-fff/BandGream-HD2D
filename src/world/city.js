@@ -51,6 +51,10 @@ import { Group, Mesh, BoxGeometry, PlaneGeometry, MeshStandardMaterial } from 't
 import { initHD2D } from './textures.js';
 import * as HD2D_GEN from './hd2dTextures.js';
 import { createTree, createLampPost, createBarrel, createCrate, createPlanter } from './props.js';
+import {
+  BUILDING_TYPES, TYPE_FOOTPRINT, pickBuildingType, bindSightRegistry,
+  tagBuilding, exportBuildingTags
+} from './buildingTypes.js';
 
 const HD2D = initHD2D(HD2D_GEN);
 
@@ -191,121 +195,30 @@ export function exportBlockers() {
 }
 
 /**
- * 屋脊比墙宽出的量（见 makeHouse 末尾的登记说明）。
- * 与 props.js createHouse 里的 box(w + 0.9, 0.3, 0.42, ...) 保持一致——
- * 同一事实写在两处，改一处必须改另一处。
+ * 取走并清空建筑标签表（诊断用）。
+ *
+ * 【为什么不把标签挂在 blockers 上】
+ * blockers 是相机与碰撞的热路径数据结构，每帧遍历上千次。
+ * 给它加字段会让缓存行占用变差，而且诊断标签的更新频率
+ * 与游戏逻辑无关，不该污染运行时数据。
+ * 与 blockers 同款「取走即清空」：每个场景只统计一次。
  */
-const ROOF_OVERHANG_X = 0.9;
+export function exportTags() {
+  return exportBuildingTags();
+}
 
 /**
- * 单栋房屋
- * @param {number} x @param {number} z 中心坐标
- * @param {number} w宽（X） @param {number} d 深（Z） @param {number} h 墙高
- * @param {number} roofH 屋顶高
- * @param {number} lod 细节级
- * @param {boolean} faceSouth 正面是否朝+Z（面向玩家的默认朝向）
+ * 把建筑类型库的遮挡登记接到本模块的 BLOCKERS 上。
+ *
+ * 【为什么要用「注入」而不是直接 import】
+ * 建筑类型库（buildingTypes.js）要用本模块的 registerBlocker，
+ * 而本模块也要用它的 BUILDING_TYPES —— 双向 import 会构成循环依赖。
+ * 依赖注入打破这个环：两边互不认识，只在模块加载时由 city.js 单向交出能力。
+ *
+ * 效果是两份代码写进**同一个 BLOCKERS 数组**，
+ * 相机与角色拿到的仍是单一数据源（见本文件顶部的说明）。
  */
-function makeHouse(x, z, w, d, h, roofH, lod, faceSouth = true) {
-  const g = new Group();
-
-  // 材质取自共享池（见上方说明）——绝不能在这里 new
-  const wallMat = lod === LOD_FAR ? pick(FAR_MATS) : pick(WALL_MATS);
-  const roofMat = lod === LOD_FAR ? pick(FAR_MATS) : pick(ROOF_MATS);
-
-  // 墙
-  const walls = new Mesh(new BoxGeometry(w, h, d), wallMat);
-  walls.position.set(0, h / 2, 0);
-  walls.castShadow = lod !== LOD_FAR;
-  walls.receiveShadow = true;
-  g.add(walls);
-
-  // 屋顶：略大于墙体的斜盒
-  const roof = new Mesh(new BoxGeometry(w * 1.12, roofH, d * 1.12), roofMat);
-  roof.position.set(0, h + roofH / 2, 0);
-  roof.castShadow = lod !== LOD_FAR;
-  g.add(roof);
-
-  // 门窗只在中近景做
-  //
-  // ===================================================================
-  // 【朝向：这一处改了三轮才对，过程值得记下来】
-  // ===================================================================
-  // 第 1 轮：门贴 +Z 面（朝南），靠 faceSouth 翻转。
-  //   问题：主街两侧的房子 x 在 40±15，门朝 ±X 才朝街；
-  //         朝 +Z 的话两侧的房子门都朝着街道的延长线，读作「背街」。
-  //
-  // 第 2 轮：门贴 ±X 面（朝街）。
-  //   问题：**相机根本看不到**。相机固定在玩家 +Z 侧俯视，
-  //         画面里能看到的是屋顶和 +Z 那一面，
-  //         ±X 侧面只在画面最边缘露出一点斜角，
-  //         门窗贴在上面等于白做 —— 实测门窗生成 69 处，画面里一个都看不到。
-  //
-  // 第 3 轮（本轮）：门贴 +Z 面，且**不依赖街的朝向**。
-  //   理由：这是斜俯视构图，玩家看到的永远是「朝自己的一面」。
-  //   房屋朝向街是「逻辑正确」，但在固定俯角下玩家看不到那一面；
-  //   OT2 的做法是把门和窗做在**朝向相机的那一面**，
-  //   靠房屋的旋转 + 立体屋顶制造「这是临街面」的感觉。
-  //
-  //   所以 faceSouth 的语义改为：房屋整体是否背朝相机（用于轻微转身），
-  //   门窗则统一贴在 +Z（朝向相机）。
-  // ===================================================================
-  if (lod === LOD_NEAR) {
-    // 【尺寸要够大才看得见】
-    // 斜俯视角下，门窗是「贴在墙上的小块凸起」，
-    // 原来的门 w*0.22 ≈ 1.5 单位在 30 单位外只有几个像素，读不出来。
-    // 放大到 w*0.34 / h*0.55，门在画面里才有可辨识的深色块。
-    const door = new Mesh(new BoxGeometry(w * 0.34, h * 0.55, 0.16), TRIM_MAT);
-    door.position.set(0, h * 0.275, d / 2 + 0.04);
-    g.add(door);
-
-    // 窗：门两侧各一扇，分开布局，避免读作「一个带洞的方块」
-    for (const sx of [-w * 0.3, w * 0.3]) {
-      const win = new Mesh(new BoxGeometry(w * 0.22, h * 0.3, 0.14), TRIM_MAT);
-      win.position.set(sx, h * 0.6, d / 2 + 0.04);
-      g.add(win);
-    }
-
-    // 檐口线：一条横向深色带，把墙和屋顶分开。
-    // 【为什么必须有这一条】
-    // 墙是暖白、顶是赭红，斜俯视下屋顶占面积最大，
-    // 两者之间如果没有过渡，整栋房子读作「一个色块+ 一个色块」；
-    // 加一道深色檐线后立刻能读出「墙 / 屋檐 / 屋顶」三层结构，
-    // 这是 OT2 建筑读得清的关键细节，成本只有 12 个三角面。
-    const eave = new Mesh(new BoxGeometry(w * 1.08, h * 0.055, d * 1.08), TRIM_MAT);
-    eave.position.set(0, h - h * 0.02, 0);
-    g.add(eave);
-  }
-
-  g.position.set(x, 0, z);
-  // 轻微朝向偏转：整片房子绝对平行会读作「复制粘贴」
-  g.rotation.y = rand(-0.08, 0.08);
-
-  // 登记到场景级列表，供相机避障与玩家碰撞查询。
-  // 【为什么需要】
-  // 相机固定在角色 +Z 侧 34 单位、高 16.6 处。
-  // 地图放大到 280×260 后街区密度很高，玩家在街区里走时，
-  // 相机很可能正好位于某栋房子内部 —— 实测在 (-30,120) 附近
-  // 相机穿进了建筑，画面被一堵墙完全遮住，角色看不见。
-  //
-  // 存的是**包围盒**而不是中心点：避障要判断「相机是否在盒内」，
-  // 中心点+半径的近似在长条形房屋上会算错。
-  //
-  // 【尺寸必须覆盖屋脊，不能只量墙】
-  // createHouse 的屋脊是 box(w + 0.9, ...)，比墙宽出 0.9。
-  // 只登记 w 的话，屋脊会戳出登记盒之外 —— 射线诊断实测到
-  // 一个 11×7.5×8 的屋顶盒挂在 11 宽的登记盒侧面，
-  // 于是相机认为视线通畅，实际屋顶糊在镜头前。
-  // 斜屋顶的 Z 向悬挑不用管：panel 绕 X 旋转 slope 后
-  // 水平跨度恰好回到 d（斜长 × cos = d/2，居中偏移 d/4 × 2）。
-  //
-  // solid = true：房子既挡视线也挡路。玩家不能穿墙，
-  // 否则会走进房子内部，此时相机必然被四面墙围死。
-  //
-  // 这里累积到模块级数组，由 exportBlockers()一次性取走，
-  // 避免把数组参数层层往下传。
-  registerBlocker(x, z, w + ROOF_OVERHANG_X, d, h + roofH, true);
-  return g;
-}
+bindSightRegistry((x, z, w, d, top, solid) => registerBlocker(x, z, w, d, top, solid));
 
 /**
  * 生成整座外围城区
@@ -342,6 +255,43 @@ export function createOutskirts(WORLD, coreHalf = 50) {
   const STREET = 9;
   const BLOCK = 20;
 
+  // ==========================================================================
+  //  地标锚点
+  // ==========================================================================
+  //
+  // 【为什么必须有 —— 这是「协调建筑分布」的核心诉求】
+  // 没有地标的城镇是一张**均质纹理**：走到哪都长得一样，玩家记不住位置，
+  // 于是每次都是「陌生的街区」。而 OT2 的每个小镇都有 2~3 个极明显的地标
+  //（钟楼、教堂、市集），玩家靠它们导航 ——「往钟楼那边走」。
+  //
+  // 它还顺带解决了纯随机布局的一个隐藏缺陷：
+  // 随机抽样下教堂与民居的出现概率相同，于是教堂淹没在民房里、
+  // 毫无存在感。**只有固定间隔插入才能让它成为视觉焦点。**
+  //
+  // 为什么只在主街放：地标的价值是「在玩家常走的路上能被看见」。
+  // 放在深巷里的地标等于不存在 —— 看不见的锚点不产生记忆。
+  //
+  // 地标间隔：每 4 栋插一个。
+  //
+  //  【选型标准：高度突出 或 剪影独特，两条至少占一条】
+  // 旧表里有 marketStall(3.3m) 和 townhouse(7.1m) —— 这两个当地标是失效的：
+  //  3.3 米的市集棚比旁边民居还矮，玩家走过去根本不会意识到「这里是地标」；
+  //  而 townhouse 是主街的常规配置，出现 5 次就不叫「标记」了。
+  //
+  //  【GAP 由 5 降到 4 是实测校准的结果】
+  //  GAP=5 时全城 9 单位以上只有 13 栋，而 4~6 高度档有 669 栋 ——
+  // 比例 1:51，天际线读作「一堵平顶的墙」，起伏几乎为零。
+  //  GAP=4 把主街 76 栋变成约 19 个地标位，高低起伏才真正能被看见。
+  //
+  //  现表覆盖三种「一眼能认」的形态：
+  //    chapel  尖拱 + 钟楼 + 四棱尖顶，13.4m，最高且最复杂
+  //    tower    八棱锥 + 顶尖，16.7m，全城最高，远处可见
+  //    workshop 大烟囱，7.0m 但烟囱高出屋顶近 3 米，剪影独特
+  //    marketStall 条纹布幔棚，3.1m 矮，但形态与所有坡屋顶建筑都不同
+  const LANDMARK_GAP = 4;
+  const LANDMARKS = ['chapel', 'tower', 'marketStall', 'chapel', 'workshop'];
+
+
   // ============ 网格化街区布局 ============
   //
   // 【第一版用的是「沿矩形周长参数化取点」，那个算法有两个致命 bug】
@@ -375,30 +325,112 @@ export function createOutskirts(WORLD, coreHalf = 50) {
   // 【间距为什么是 13~17】
   // 房子宽 6~8，间距 13~17 意味着房子之间留 5~9 单位 —
   // 读作「各家之间有小院/小巷」，正是港口小镇的密度。
-  const streetRow = (xSide, zFrom, zTo) => {
-    // 【faceSouth 的语义】true = 街在 -X 侧，即这排房子位于主街东边。
-    // 主街在 x=40：东侧房子（x>40）朝西开门，西侧房子朝东开门。
-    const faceSouth = xSide < MAIN_STREET_X;
-    let z = zFrom + rand(0, 8);
-    while (z < zTo) {
-      const hw = rand(6.0, 8.0);
-      const hd = rand(5.5, 7.5);
-      const hh = rand(4.5, 7.5);
-      // 【关键：房子中心必须落在相机的横向视野内】
-      // 实测 fov 42 / distance 34 / pitch 26 时，
-      // 身前 30 单位处的可视横向半宽约 25.5，角色附近约 14.5。
-      //
-      // 取 13.5~16 的依据：路缘在 9，房子半宽 3~4。
-      //   9 + 3 = 12   ← 房子紧贴路缘会「压在路面上」，读作墙直接接路
-      //   9 + 7 = 16   ← 留 3~7 单位院子，读作「有前院的小屋」
-      // 13.5~16 落在两者之间，既不压路，又稳在角色深度的可视半宽内。
-      // （第一版放在 ±11.5，房子紧贴路面；第二版 ±15 越过了可视边界，
-      //   只在远景露出屋顶角。）
-      const hx = xSide + (13.5 + rand(0, 2.5)) * Math.sign(xSide - MAIN_STREET_X);
-      if (hx > B.maxX - 8 || hx < B.minX + 8 || hzGuard(hx, z)) { z += 14; continue; }
-      group.add(makeHouse(hx, z, hw, hd, hh, hh * 0.4, lodAt(hx, z), faceSouth));
-      // 间距随机，避免出现等距的机械节奏
-      z += 13 + rand(0, 4);
+  // ==========================================================================
+  //  沿街建筑：联排面 + 高度梯度 + 地标锚点
+  // ==========================================================================  //
+  // 【为什么是「联排」而不是「每隔一段放一栋」】
+  // 旧实现每13~17 单位放一栋独立房子，房子之间留 5~9 单位空隙。
+  // 结果沿街看过去是「一栋房子 + 一段空地 + 一栋房子」——
+  // 读作**郊区别墅**，不是城镇。
+  //
+  // 真实的欧洲中世纪城镇长这样：山墙**紧挨着山墙**连续排列，
+  // 构成一整片连续的沿街立面（street wall），
+  // 房屋之间的分隔靠「山墙贴山墙 + 立面高低错落」，
+  // 而不是靠空地。
+  //
+  // 这个差别在 HD-2D 里尤其致命：斜俯视下玩家看到的是屋顶的连续天际线。
+  // 房子之间留空隙 → 天际线是一串孤立的三角；
+  // 联排→ 天际线是连续的、只有高度变化没有断裂。
+  // 后者才是 OT2 里那些小镇的观感。
+  //
+  // 所以下面改成：沿街按模数**连续排布**，不留随机大空隙，
+  // 空隙只留给「需要通光的巷口」（每 3~4 栋留一个 4 单位的巷口）。
+  // ==========================================================================
+
+  /**
+   * 沿一条街排一列建筑。
+   *
+   * @param {'z'|'x'} axis 街道走向：'z' = 南北向（沿 Z 排）/ 'x' = 东西向
+   * @param {number} line   街道坐标（axis='z' 时是 x，axis='x' 时是 z）
+   * @param {number} side   哪一侧：+1 / -1
+   * @param {number} from   起始坐标
+   * @param {number} to     结束坐标
+   * @param {string} tier   传给 pickBuildingType 的档位
+   */
+  const streetRow = (axis, line, side, from, to, tier) => {
+    let cursor = from;
+    let n = 0;
+    // 高度节奏：每隔 3~5 栋插一栋更高的，形成韵律。
+    // 连续的天际线也需要变化 —— 全是同高的民居会读作「一堵平顶的墙」。
+    let beat = 0;
+    let beatTarget = 3 + Math.floor(rng() * 3);
+    // 距上一个地标过了几栋
+    let sinceLandmark = 0;
+    // 距上一个巷口过了几栋
+    //
+    // 【为什么必须独立计数，不能复用 n —— 这里曾死循环】
+    // 旧写法是 `if (n % (3 + rng()*2) === 0) { cursor += 4; continue; }`。
+    // n 在巷口分支里不变，于是每轮都拿同一个 n 再掷一次 p。
+    // 当 n 同时是 3 和 4 的公倍数（n=12、24…）时，n%3==0 且 n%4==0，
+    // p 无论掷出 3 还是 4 都命中 → 永远命中 → n 永远不推进 → 死循环。
+    // 症状很隐蔽：主街只排出 12 栋就停，z 停在 78 而范围明明到 230，
+    // 而 while(cursor < to) 仍在跑，只是光标每次只挪 4 个单位，
+    // 一直挪到 to 才退出 —— 表现为「后面 150 米一条街全是空地」。
+    // 独立的 alleySince 每放一栋就 +1，巷口分支里也 +1，
+    // 保证无论掷出什么都会推进计数，不可能卡死。
+    let alleySince = 3 + Math.floor(rng() * 3);
+    let alleyTarget = alleySince;
+
+    while (cursor < to) {
+      // ---- 巷口：每 3~5 栋留一个开口 ----
+      // 巷口让密集立面出现节奏断点，玩家能读出「这里通向街区内部」。
+      // 全填满的话沿街面会读作一堵 200 米长的连续墙，压迫感过强。
+      if (n > 0 && alleySince >= alleyTarget) {
+        cursor += 4.0;      // 巷口宽 4 单位
+        alleySince = 0;
+        alleyTarget = 3 + Math.floor(rng() * 3);
+        continue;
+      }
+
+      // ---- 地标锚点（只在主街） ----
+      if (tier === 'main' && sinceLandmark >= LANDMARK_GAP) {
+        const key = LANDMARKS[n % LANDMARKS.length];
+        // 放大必须**传进 makeBuilding**，由它统一调整偏移与推进长度。
+        // 旧实现是在外面 scale.setScalar(1.12)，位置不变、体积变大 ——
+        // 于是放大的那一栋正好骑在路面上。
+        const b = makeBuilding(key, cursor, line, side, axis, n, tier, 1.12);
+        group.add(b.group);
+        // 【必须按实际进深推进，不能写死】
+        // 旧的一版这里写的是 `cursor += 7.0`（按教堂进深），
+        // 于是放 townhouse（进深 4）时旁边就多出 3 单位空隙 —— 联排被切断了。
+        cursor += b.depth + 0.6;
+        n++; sinceLandmark = 0;
+        alleySince++;          // 地标也占一个沿街位，巷口计数照常推进
+        beat = 0;
+        continue;
+      }
+
+      // ---- 普通建筑 ----
+      let key = pickBuildingType(rng, tier);
+      // 节奏点：主街上把一栋换成更高的（联排民居 / 工坊）
+      if (tier === 'main' && beat >= beatTarget && rng() < 0.35) {
+        key = rng() < 0.5 ? 'townhouse' : 'workshop';
+        beat = 0;
+        beatTarget = 3 + Math.floor(rng() * 3);
+      }
+      beat++;
+      if (beat >= beatTarget) beatTarget = 3 + Math.floor(rng() * 3);
+
+      const b = makeBuilding(key, cursor, line, side, axis, n, tier);
+      group.add(b.group);
+      // 【间距由建筑实际进深决定 —— 这是联排成立的关键】
+      // 旧的固定 13~17 是为了适配「宽 6~8 的独立房子」。
+      // 现在进深是 2~7 的变量，固定间距必然忽宽忽窄 ——
+      // 按 b.depth + 0.6（墙缝）推进，得到的才是真正连续的沿街立面。
+      cursor += b.depth + 0.6;
+      n++;
+      sinceLandmark++;
+      alleySince++;
     }
   };
   // 建筑位置的合法性检查统一走这里，避免三处重复条件写漏
@@ -424,113 +456,182 @@ export function createOutskirts(WORLD, coreHalf = 50) {
     return d < 170 ? LOD_NEAR : d < 260 ? LOD_MID : LOD_FAR;
   };
 
-  streetRow(MAIN_STREET_X - 13, B.minZ + 14, B.maxZ - 10);
-  streetRow(MAIN_STREET_X + 13, B.minZ + 14, B.maxZ - 10);
+  /**
+   * 按类型生成一栋建筑，并摆到街边。
+   *
+   * 【为什么需要这层包装，而不是直接 BUILDING_TYPES[key].make(...)】
+   * 建筑类型库的 make() 假定「门朝 +Z、房子位于原点」。
+   * 而沿街排布需要三件额外的事：
+   *
+   *  1. **朝向**：沿东西向街道的门必须朝 +X 或 -X，否则整排房子背对街道。
+   *  2. **偏移**：建筑要站在**路缘之外**，且偏移量随进深变化。
+   *  3. **LOD**：按到中心的距离决定细节等级。
+   *
+   * 它定义在 createOutskirts 内部（而不是模块级）是因为要用到
+   * STREET 与 lodAt —— 那两个是「街道布局参数」，属于本函数的局部概念。
+   * 放在模块级就只能再传一遍参数，纯属冗余。
+   *
+   * @param {string} key   BUILDING_TYPES 的键
+   * @param {number} cursor 沿街方向的坐标
+   * @param {number} line   街道坐标（垂直于沿街方向的那条轴）
+   * @param {number} side   +1 / -1，街道的哪一侧
+   * @param {'z'|'x'} axis  街道走向：'z' = 南北向（沿 Z 排）
+   * @param {number} n      序号（用于确定性 seed）
+   * @returns {{group: Group, depth: number}} depth = 沿街进深，
+   *   调用方用它推进光标 —— 这是「联排贴住」的实现基础。
+   */
+  const makeBuilding = (key, cursor, line, side, axis, n, zone = 'unknown',
+    scale = 1) => {
+    const type = BUILDING_TYPES[key];
+    const fp = TYPE_FOOTPRINT[key];
+    const seed = n * 13 + Math.floor(rng() * 997) + Math.round(line) * 3;
+    const lod = lodAt(...(axis === 'z' ? [line, cursor] : [cursor, line]));
 
-  // ---- 东西向横街 + 街区内部建筑 -------------------------------------
+    // 【偏移必须随进深变化】
+    // 街缘到建筑中心的距离 = 半个街宽 + 半个进深 + 院子余量。
+    // 旧实现固定 ±13.5~16，那只对「宽 6~8 的单一房子」成立。
+    // 现在进深在 2~7 之间（杂物棚 2、教堂 7）：
+    // 固定偏移会让仓库压到路面上、杂物棚飘在半空。
+    //
+    // 【但沿街与围合的偏移含义不同】
+    // 沿街：建筑在街边线外 STREET 处，偏移要含半个街宽（9）。
+    // 围合：建筑贴着**地块自己的边界线**，那里根本没有街，
+    //       用9 会把它平白推出去 9 米 —— 围合的墙直接散进荒地。
+    // 所以街宽作为参数传入，围合传 0。
+    //
+    // 【院子余量必须随进深放大，不能是固定 1.2 —— 这是实测撞出来的】
+    // 固定 1.2 时，教堂（进深 7）的偏移 = 9 + 3.5 + 1.2 = 13.7，
+    // 而它半进深 3.5 → 路缘到建筑只剩 13.7 - 3.5 = 10.2...
+    // 但路面半宽是 9，看起来还有 1.2 余量 —— 问题是**山墙尖顶
+    // 与钟楼还要往外探**（见 buildingTypes.js chapel 的钟楼偏置），
+    // 实测教堂 @ (52.0, 160.3) 确实骑到了路面上。
+    //
+    // 修正：余量按进深比例给（深房子退让更多），
+    // 这样「路缘到建筑边缘」在所有进深下都是同一个正值。
+    // 【缩放必须计入偏移 —— 否则地标放大后会骑到路面上】
+    // 教堂地标放大 1.12 后进深由 7变 7.84，而偏移仍是按 7 算的，
+    // 于是路缘到建筑少了 0.42 米。实测教堂 @ (52.0, 158.8)
+    // 距街心只有 12.0（应为 9 + 3.92 + yard），正好压在路面上。
+    const setback = zone === 'perimeter' ? 0 : STREET;
+    const yard = (zone === 'perimeter' ? 0 : 1.2 + fp.depth * 0.22) * scale;
+    const offset = setback + fp.depth * scale / 2 + yard;
+
+    const g = type.make(0, 0, { seed, lod });
+
+    if (axis === 'z') {
+      g.position.x = line + side * offset;
+      g.position.z = cursor;
+      // 门朝街：side<0 表示街在建筑西侧 → 门朝 +X
+      g.rotation.y = side < 0 ? Math.PI / 2 : -Math.PI / 2;
+    } else {
+      g.position.x = cursor;
+      g.position.z = line + side * offset;
+      // side<0 表示街在建筑南侧 → 门朝 +Z
+      g.rotation.y = side < 0 ? 0 : Math.PI;
+    }
+    // 标签的 depth 记**缩放后**的实际进深：
+    // 诊断脚本靠它算沿街间隙与是否压路，用未缩放的值会算出假断口。
+    tagBuilding(g, key, g.position.x, g.position.z,
+      fp.depth * scale, fp.height * scale, zone);
+    // 推进长度同样按缩放后计：地标放大 1.12 就多占 12% 的沿街长度。
+    return { group: g, depth: fp.depth * scale };
+  };
+
+  // ---- 主街两侧 ----
+  streetRow('z', MAIN_STREET_X, -1, B.minZ + 14, B.maxZ - 10, 'main');
+  streetRow('z', MAIN_STREET_X, +1, B.minZ + 14, B.maxZ - 10, 'main');
+  // ==========================================================================
+  //  东西向横街
+  // ==========================================================================
   // 【横街是必需的，不是装饰】
   // 只有一条南北主街时，玩家走到东西两侧就是「主街背后」，
-  // 那里如果只有随机散点，读作城市背面。
-  // 插入横街后，整个 280×260 被切成若干街区，
+  // 那里如果只有散点，读作城市背面。插入横街后整个 280×260 被切成街区，
   // 玩家在任何位置都处在「两条街的交叉点」附近，方向感才成立。
+  //
+  // 【本轮改动：复用 streetRow，不再写第二套排布逻辑】
+  // 旧实现里横街的 col() 把「随机尺寸 + 固定间距」又写了一遍，
+  // 与主街的 streetRow 高度重复，且偏移算法本身有 bug ——
+  // col() 里那个 `Math.sign(xSide - cx)` 因为 xSide 传进来的就是 cx±13，
+  // 符号恒为 ±1，两排房子实际共用同一套偏移逻辑，位置不可控。
+  //
+  // 现在 streetRow 参数化 axis（'z' = 南北向 / 'x' = 东西向），
+  // 横街直接调用它 —— 联排、巷口、节奏、地标四项逻辑只有一份。
   const CROSS_X = [MAIN_STREET_X - 58, MAIN_STREET_X + 58];
   const CROSS_Z = [70, 140, 210];
   for (const cx of CROSS_X) {
     for (const cz of CROSS_Z) {
-      // 横街上的房子：沿横街南北两侧各排一列。
+      // 【横街必须在主街路口留出空档 —— 这是路口不被建筑堵死的前提】
+      // 横街原本从 cx-46 排到 cx+46。以 cx = 40+58 = 98 为例，
+      // 起点是52，而主街路面范围是 31~49 —— 只差 3 米。
+      // 建筑再往外退一点就直接骑在主街路面上，
+      // 路口被两排房子夹住，读作「一条死巷」而不是十字路口。
       //
-      // 【原实现的 bug】参数叫 xSide，传入 cx±13，却写
-      //   hx = cx + (...) * Math.sign(xSide - cx)
-      // 而 xSide 传进来的就是 cx±13，于是 Math.sign 的结果恒为 ±1，
-      // 但「房屋所在的那条街」到底是哪一条没有被真正区分 ——
-      // 两排房屋实际上共用同一套偏移逻辑，位置不可控。
-      // 正确做法：把偏移量当参数传入，同时用它推出开门朝向。
-      const col = (offsetX) => {
-        // 街中心在 cx，房子在 cx+offsetX，所以门朝 -sign(offsetX) 侧（即朝街）
-        const faceSouth = offsetX > 0;
-        let z = cz + 12;
-        while (z < Math.min(cz + 78, B.maxZ - 10)) {
-          const hw = rand(6, 8), hd = rand(5.5, 7.5), hh = rand(4.5, 7.5);
-          const hx = cx + offsetX;
-          if (hx > B.maxX - 8 || hx < B.minX + 8 || hzGuard(hx, z)) { z += 14; continue; }
-          group.add(makeHouse(hx, z, hw, hd, hh, hh * 0.4, lodAt(hx, z), faceSouth));
-          z += 13 + rand(0, 4);
-        }
-      };
-      col(-(13.5 + rand(0, 2.5)));
-      col(13.5 + rand(0, 2.5));
+      // 正确做法：横街在主街两侧各留出「路面半宽 + 建筑退让」的空档，
+      // 即从主街中心线两侧 MAIN_GAP 起排。
+      // 这样十字路口的四个角是开敞的，玩家能一眼看穿过去。
+      const gapFromMain = MAIN_STREET_X - (STREET + 4.5);
+      streetRow('x', cz + 34, -1, Math.max(cx - 46, gapFromMain), cx + 46, 'cross');
+      streetRow('x', cz + 34, +1, cx - 46, Math.min(cx + 46, MAIN_STREET_X + gapFromMain), 'cross');
     }
   }
 
-  // ---- 街区内填充建筑：保证远处不是空地 --------------------------------
-  // 【为什么要保留这一层】
-  // 沿街排布只覆盖街道两侧的窄带，街区内部和城市边缘（x 远离主街时）
-  // 会露出大片空地 —— 玩家从横街往外走几步又是荒地。
-  // 这一层用低密度散点把空地填上，但**只填远处**，
-  // 近处保留空隙（院子/菜地），否则近景会挤成一团。
+  // ==========================================================================
+  //  街区内填充：围合式布局（不是撒点）
+  // ==========================================================================
+  // 【旧实现是网格撒点，失败在两处】
+  //  1. 撒点的朝向随机 → 会出现「门朝着院墙」的房子
+  //  2. 密度不可控：某些格子 2 栋、某些 0 栋，近景出现空洞
+  // 读出来是「郊区别墅群」而不是「街区」。
+  //
+  // 【改成围合：沿地块四边各排一列，中间留院子】
+  // 这是真实街区的形态（block perimeter + courtyard）。
+  // 它同时解决上面两点：朝向由「门朝地块外」唯一确定，
+  // 密度由「边长 / (进深 + 墙缝)」决定，不会出现空格子。
+  //
+  // 为什么必须填：沿街排布只覆盖街道两侧的窄带，
+  // 玩家从横街往外走几步又是荒地 —— 读作城市背面。
   for (let gz = B.minZ + BLOCK; gz < B.maxZ; gz += BLOCK) {
     for (let gx = B.minX + BLOCK; gx < B.maxX; gx += BLOCK) {
       if (gz < 2) continue;
       if (Math.abs(gx) < coreHalf && gz < 40) continue;
 
-      // 已经有沿街建筑覆盖的区域不再撒点，避免重叠
-      const nearMain = Math.abs(gx - MAIN_STREET_X) < 26;
+      // 已有沿街建筑的区域跳过，避免两套排布重叠
+      const nearMain = Math.abs(gx - MAIN_STREET_X) < 30;
       let nearCross = false;
       for (const cx of CROSS_X) {
         for (const cz of CROSS_Z) {
-          if (Math.abs(gx - cx) < 26 && gz > cz - 4 && gz < cz + 90) nearCross = true;
+          if (Math.abs(gx - cx) < 30 && gz > cz - 8 && gz < cz + 84) nearCross = true;
         }
       }
       if (nearMain || nearCross) continue;
 
-      const dist = Math.hypot(gx, gz - 60);
-      const nHouses = lodAt(gx, gz) === LOD_FAR ? 1 : randInt(1, 2);
-      for (let k = 0; k < nHouses; k++) {
-        const hw = rand(6.0, 8.0);
-        const hd = rand(5.5, 7.5);
-        const hh = rand(4.5, 7.5);
-        const hx = gx + rand(-BLOCK * 0.28, BLOCK * 0.28);
-        const hz = gz + rand(-BLOCK * 0.28, BLOCK * 0.28);
-        if (hx < B.minX + 8 || hx > B.maxX - 8) continue;
-        if (hz < 3 || hz > B.maxZ - 8) continue;
-        if (Math.abs(hx - MAIN_STREET_X) < STREET + 2) continue;
-        // 填充层没有明确街道，朝向随机即可 —— 反正不在近景主街上
-        group.add(makeHouse(hx, hz, hw, hd, hh, hh * 0.4, lodAt(hx, hz), rng() < 0.5));
+      // 地块边界（内缩 3.4，让围合的墙之间留出小巷）
+      const inset = 3.4;
+      const x0 = gx - BLOCK / 2 + inset, x1 = gx + BLOCK / 2 - inset;
+      const z0 = gz - BLOCK / 2 + inset, z1 = gz + BLOCK / 2 - inset;
+      if (x1 - x0 < 4 || z1 - z0 < 4) continue;
+
+      // 沿 Z 边的两排（门朝地块外）
+      for (const [z, s] of [[z0, -1], [z1, 1]]) {
+        let x = x0, k = 0;
+        while (x < x1) {
+          const b = makeBuilding(pickBuildingType(rng, 'fill'), x, z, s, 'z', k++, 'perimeter');
+          group.add(b.group);
+          x += b.depth + 0.8;
+        }
+      }
+      // 沿 X 边的两排（门朝地块外）
+      for (const [x, s] of [[x0, -1], [x1, 1]]) {
+        let z = z0, k = 0;
+        while (z < z1) {
+          const b = makeBuilding(pickBuildingType(rng, 'fill'), z, x, s, 'x', k++, 'perimeter');
+          group.add(b.group);
+          z += b.depth + 0.8;
+        }
       }
     }
   }
 
-  // ============ 主街 ============
-  // 从码头一路向北到内陆，宽度足够跑马。
-  // 主街是超大地图里的「方向锚点」—— 玩家只要沿着它走就知道自己在往哪去。
-  const roadMat = new MeshStandardMaterial({
-    map: HD2D.tex('stonePaving', { seed: 55, hue: 33, sat: 0.16, baseL: 0.72 },
-                  Math.round(26 * WORLD.SCALE * 0.5)),
-    roughness: 0.94, metalness: 0.0
-  });
-  roadMat.color.setHex(0xffffff);
-  const roadLen = B.maxZ - B.minZ;
-  const road = new Mesh(new PlaneGeometry(STREET * 2, roadLen), roadMat);
-  road.rotation.x = -Math.PI / 2;
-  road.position.set(MAIN_STREET_X, 0.015, (B.minZ + B.maxZ) / 2);
-  road.receiveShadow = true;
-  road.name = 'main_street';
-  group.add(road);
-
-  // ---- 东西向横街的路面 ---------------------------------------------
-  // 【必须画路面，否则建筑会「凭空站在草地上」】
-  // 上面的沿街建筑是按横街两侧排布的，但没有路面对应的话，
-  // 玩家看到的���两排房子中间隔着一条草地」—— 读作两堵墙，
-  // 而不是一条街。路面是把「建筑排列」变成「街道」的唯一线索。
-  for (const cx of CROSS_X) {
-    for (const cz of CROSS_Z) {
-      const cr = new Mesh(new PlaneGeometry(88, STREET * 2), roadMat);
-      cr.rotation.x = -Math.PI / 2;
-      cr.position.set(cx, 0.014, cz + 34);
-      cr.receiveShadow = true;
-      group.add(cr);
-    }
-  }
 
   // ============ 主��两侧的绿化与道具 ============
   // 只在近区放 —— 路灯和树要castShadow，远处放几千个会拖垮帧率，
@@ -551,11 +652,24 @@ export function createOutskirts(WORLD, coreHalf = 50) {
         const t = createTree({ h, spread, lod: z < 90 ? 0 : z < 190 ? 1 : 2 });
         t.position.set(x, 0, z);
         group.add(t);
-        // 【必须登记：树会挡视线】沿街一排树正好横在
-        // 「相机（角色 +Z 侧 34）→ 角色」的连线上。
-        // 树冠横向范围按 spread*1.6 取（最外侧球心在 ±0.6*spread，
-        // 半径 0.4*spread*0.95，留一点余量）。
-        registerBlocker(x, z, spread * 3.2, spread * 3.2, h, false);
+        // 【树会挡视线，但不该按实心盒登记 —— 这一处曾把俯角逼到 48°】
+        //
+        // 旧写法：registerBlocker(x, z, spread*3.2, spread*3.2, h, false)
+        // spread 最大3.4 → 登记盒 10.9 × 10.9、高 7.5。
+        // 于是一棵树在视线里就是一堵 11 米宽的高墙，
+        // 沿街一排树直接组成连续的遮挡墙，
+        // 相机第 0 阶段（横移+缩距）无解 → 退到抬升兜底 → 俯角冲到 48°。
+        //
+        // 为什么不该按实心算：树冠是透空的球簇，
+        // 视线穿过树冠缝隙在视觉上完全可接受，
+        // 玩家看到的是「镜头从树梢之间穿过去」，不是「镜头撞到树」。
+        // 所以登记盒必须比实际树冠小，且高度取树冠下缘 ——
+        // 只有 trunk 高度以下的那段（贴近角色视高的）才算真遮挡。
+        //
+        // 保留登记的必要性：树干确实会挡，且相机若真的穿进树干观感更差。
+        // 尺寸依据：trunk 半径约 0.22，取 0.7 见方足够包住；
+        // 高度取 2.6 —— 略高于角色视高(1.2)，低于树冠起点。
+        registerBlocker(x, z, 0.7, 0.7, 2.6, false);
       } else if (r < 0.62) {
         // 路灯
         const l = createLampPost();
@@ -597,9 +711,9 @@ export function createOutskirts(WORLD, coreHalf = 50) {
     const t = createTree({ h, spread, lod: tlod });
     t.position.set(x, 0, z);
     group.add(t);
-    // 与沿街树同理：散树同样会横在视线上。
-    // solid = false —— 玩家可以从树下走过，只是别让树挡住镜头。
-    registerBlocker(x, z, spread * 3.2, spread * 3.2, h, false);
+    // 与沿街树同理：树冠透空，只登记树干那一段。
+    // solid = false —— 玩家可以从树下走过，只是别让树干挡住镜头。
+    registerBlocker(x, z, 0.7, 0.7, 2.6, false);
   }
 
   return group;

@@ -20,3 +20,19 @@ preview/
 # 它是纯派生文件，进版本库只会造成无意义的 diff 噪音。
 __pycache__/
 *.py[cod]
+
+# 原始资产包（174MB，运行时不加载）
+#
+# assets-source/3d-buildings/ 是 Quaternius 的 CC0 中世纪村庄资产
+# （176 个 glTF 模块）。**代码里没有任何运行时引用**——
+# 我们只从中提取了「2 单位墙模数 / 3.12 层高」这套营造尺寸，
+# 建筑全部是程序化生成的（理由见 src/world/buildingTypes.js 开头）。
+#
+# 所以它对构建产物毫无贡献，进版本库只会让 clone 慢 10 倍。
+# 保留在本地供后续比对参考。
+assets-source/3d-buildings/
+
+# 打包产物（由打包脚本生成，属于派生物）
+ot2-hd2d-harbor.zip
+ot2-hd2d-harbor-git.bundle
+.cloudstudio

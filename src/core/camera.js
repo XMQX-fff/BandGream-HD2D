@@ -145,6 +145,18 @@ export function createCamera() {
   // null 表示还没注入 —— 此时不做避障（会在第一次就撞墙）。
   cam.userData.blockers = null;
   cam.userData._desired = new Vector3();
+  /**
+   * 横移量的**滤波后**取值。
+   *
+   * 【为什么需要它 —— 抖动是实测出来的，不是设想的】
+   * shiftX 来自离散搜索（步长 4.08），玩家沿街走时街边树不断进出视野，
+   * 于是目标横移在 0 与 16.3 之间反复跳。相机阻尼每帧只走 10%，
+   * 约 0.4 秒才跟上 —— 玩家看到的就是「镜头每隔一两秒横向抽搐一下」。
+   *
+   * 静态机位测试**完全测不出这个问题**（每个点都等 15 秒才采样，
+   * 抖动早就衰减完了）。只有连续行走才能暴露。
+   */
+  cam.userData._shiftX = 0;
   cam.userData._forward = new Vector3();
 
   cam.position.set(0, CAMERA_CONFIG.height, CAMERA_CONFIG.distance);
@@ -191,10 +203,12 @@ export function updateCamera(camera, targetX, targetY, targetZ, dt) {
   const blockers = camera.userData.blockers;
   let lift = 0;
   let pull = 0;
+  let shiftX = 0;
   if (blockers && blockers.length) {
     const sol = solveSightline(targetX, targetY, targetZ, blockers, fit, cfg);
     lift = sol.lift;
     pull = sol.pull;
+    shiftX = sol.shiftX;
   }
 
   // 抬升 / 缩短距离的实际施加。
@@ -208,6 +222,26 @@ export function updateCamera(camera, targetX, targetY, targetZ, dt) {
     // 拉远是抬升的必然代价 —— 不拉远俯角就会趋近 90°。
     desired.z = targetZ + baseDist - pull;
   }
+  // 横移必须与注视点同步（见 solveSightline 注释）：
+  // 相机移了、注视点不移，角色就会在画面里横向漂出去。
+  //
+  // 【横移要先做一阶低通，不能直接用求解值】
+  // 求解结果是离散跳变的（0 ↔ 4.08 ↔ … ↔ 16.3），玩家沿街走时
+  // 街边树不断进出视野，目标值每1~2 秒跳一次。
+  // 直接用会让相机横向抽搐，所以这里按「接近目标」的速率缓动。
+  //
+  // 速率取 2.5/s：比位移阻尼（6.5）慢，横移显得是「镜头缓缓让开」；
+  // 但快到 0.4 秒内就能跟上，玩家不会觉得镜头跟不上自己。
+  // 上限 20/s：目标突然反向（绕过一棵树后下一棵树在另一侧）时
+  // 仍能在半秒内纠正，否则会「卡在错误的一侧」持续遮挡。
+  const SHIFT_RATE = 2.5;
+  const SHIFT_RATE_REVERSE = 20;
+  const prevShift = camera.userData._shiftX;
+  const shiftRate = Math.abs(shiftX) < Math.abs(prevShift) ? SHIFT_RATE : SHIFT_RATE_REVERSE;
+  const step = (shiftX - prevShift) * (1 - Math.exp(-shiftRate * dt));
+  const shiftFiltered = prevShift + step;
+  camera.userData._shiftX = shiftFiltered;
+  desired.x = targetX + shiftFiltered;
 
   // 阻尼插值，避免硬跟随带来的抖动。
   // k 必须落在 [0,1]：负值会让 lerp 反向放大位置、逐帧发散。
@@ -266,7 +300,11 @@ export function updateCamera(camera, targetX, targetY, targetZ, dt) {
   const pullRatio = Math.max(0, pull / Math.max(1e-6, cfg.distance * fit.distScale));
   const liftFactor = Math.max(0, 1 - Math.max(liftRatio / 0.9, pullRatio / 0.45));
   const lookAhead = CAMERA_CONFIG.lookAhead * (1 - fit.lookAheadScale) * liftFactor;
-  camera.userData.target.set(targetX, targetY + 1.2, targetZ - lookAhead);
+  // 横移量同步加到注视点上：相机移了、注视点不移，角色就会在画面里
+  // 横向漂出去（看起来像镜头歪了，而不是镜头绕开了遮挡物）。
+  // 两边同量偏移后，视线整体平移，角色恒在画面中央。
+  camera.userData.target.set(
+    targetX + shiftFiltered, targetY + 1.2, targetZ - lookAhead);
 
   // 竖屏再补一点注视点高度，把天空挤出画面顶部。
   // 幅度远小于原来的 11 —— 原值是把视线彻底放平，等于放弃俯视构图。
@@ -283,12 +321,19 @@ const SIGHT_END_Y = 1.2;
 /**
  * 避障时的俯角上限。
  *
- * 基准俯角26°（CAMERA_CONFIG.pitchDeg），避障抬升后允许增加到 42°。
- * 42° 仍是明确的斜俯视，街景保有纵深压缩；
- * 实测 58.5° 时画面已经退化成一张俯视平面地图 ——
- * 斜俯视的立体感消失，角色压成中央一个小点。
+ * 基准俯角 26°（CAMERA_CONFIG.pitchDeg），避障抬升后允许增加到 48°。
+ *
+ * 【为什么是 48° —— 权衡的两头都要真实】
+ * 42° 时实测仍有 3/5 机位被挡：房子高 6~11、间距仅 13~17，
+ * 而相机在角色 +Z 侧 34 处，视线要跨过2~3 栋房子才能到角色。
+ * 俯角太小 → 抬不够 → 被房子糊脸。
+ * 俯角太大 → 画面退化成俯视平面地图，斜俯视立体感消失。
+ * 实测 58.5° 时画面已经是「一张地图」，角色压成中央小点。
+ *
+ * 48° 是实测平衡点：仍明确是斜俯视（能读出街景的纵深与屋顶斜面），
+ * 同时给足抬升余量让绝大多数机位视线通畅。
  */
-const MAX_PITCH = 42 * Math.PI / 180;
+const MAX_PITCH = 48 * Math.PI / 180;
 
 /**
  * 求出让「相机 → 角色」视线通畅的抬升量。
@@ -332,7 +377,19 @@ const MAX_PITCH = 42 * Math.PI / 180;
  *
  * 缩短下限：0.55× 基准（≈19 单位）。再近就看不见身前街景了。
  *
- * @returns {{lift:number, pull:number}}
+ * 【第三根杠杆：水平绕行 shiftX】
+ * 抬升与缩短都救不了「房子正好在角色正后方」的情况。
+ * 实测 (12,144)：角色被碰撞挤到一栋 top=8.3 的房子旁仅 1.1 处，
+ * 抬到 48° 上限、缩短到极限，视线掠过房顶时 rayY 最高只有 6.75——
+ * 仍低于 8.3。抬升与缩短两条路都已用尽，几何上无解。
+ *
+ * 根因：相机固定在角色 +Z 侧，只要那个方向有房子，就永远差那么一点。
+ * 真正的解法是**把相机沿 X 横移**，让视线从房子侧边绕过。
+ * 代价是视线变斜 —— 所以必须**同时把注视点横移同样的量**，
+ * 角色就仍然停在画面中央，横移只改变观察角度、不改变构图。
+ *
+ * @returns {{lift:number, pull:number, shiftX:number}}
+ *   shiftX = 相机与注视点共同的水平偏移（左右各试，取通畅的一侧）
  *   lift = 抬升高度（≥0）
  *   pull = 距离的**增量偏移**，正数= 缩短，负数 = 拉远
  *   最终距离 = baseDist - pull
@@ -346,81 +403,203 @@ function solveSightline(targetX, targetY, targetZ, blockers, fit, cfg) {
   // 整个画面变成鸟瞰地图，角色小到看不见 —— 这比遮挡更糟。
   const maxLift = baseY * 0.9;
   // 缩短下限：0.55× 基准。再近就看不见身前街景了。
+  // 注意这个下限**只约束「为躲遮挡而缩短」**，
+  // 不约束俯角约束要求的「拉远」—— 拉远只会让取景更远，
+  // 不会造成「看不见身前街景」的问题。
   const minDist = baseDist * 0.55;
+
+  // 横移上限：街宽量级。再大相机会绕到对面建筑里，
+  // 而且构图偏移观感明显 —— 玩家会觉得「镜头歪了」。
+  const maxShift = baseDist * 0.5;
 
   let lift = 0;
   let pull = 0;
+  let shiftX = 0;
 
-  // 迭代求解：抬升会改变视线落点，从而改变「哪一栋房子挡在前面」，
-  // 所以单次解析解不收敛。每轮 O(遮挡物数)，5 轮足够。
-  for (let iter = 0; iter < 5; iter++) {
-    const camY = baseY + lift;
-    const camZ = targetZ + baseDist - pull;
+  /**
+   * 视线是否通畅（不含任何调整）。
+   * 抽成函数是因为俯角约束要在「调整完成之后」再验一次 ——
+   * 拉远相机会改变 t，进而可能引入新的遮挡。
+   */
+  const sightGap = (camY, camZ, sx) => {
     const ez = camZ - targetZ;
-    if (ez < 2) break;               // 距离已到下限，不能再近
-
-    let deficit = 0;
-
+    if (ez < 1e-3) return 0;
+    let gap = 0;
     for (let i = 0; i < blockers.length; i++) {
       const b = blockers[i];
-      // 视线在 XZ 上是沿 Z 的直线（相机 X 与角色相同），
-      // 仍要判 X：房子在 X 上有宽度，视线可能从侧边掠过。
-      if (targetX < b.minX || targetX > b.maxX) continue;
-
-      // Z 方向：盒子区间对应的视线参数区间
       const t0 = (camZ - b.maxZ) / ez;
       const t1 = (camZ - b.minZ) / ez;
       const tEnter = Math.max(0, Math.min(1, Math.min(t0, t1)));
       const tExit = Math.max(0, Math.min(1, Math.max(t0, t1)));
       if (tEnter > tExit) continue;
 
-      // 遮挡最严重的点 = 靠近相机的那一端。
-      // 若视线在进入盒子时已高于屋顶，就能从上面越过，不算遮挡。
-      const t = tEnter;
-      const sightY = camY + (SIGHT_END_Y - camY) * t;
-      if (b.top <= sightY) continue;
+      // 视线在 XZ 上不再是沿 Z 的直线：t=0 在相机端 (targetX+sx)，
+      // t=1 在角色 (targetX)，所以任意 t 处的 x = targetX + sx*(1-t)。
+      //
+      // 判据随之改变：不再问「targetX 在不在盒子 X 内」，
+      // 而是问「视线穿过盒子 Z 区间的那一小段，x 有没有落进盒子 X 内」。
+      // 横移正是靠这一步生效的 —— 视线斜了，就能从房子侧边掠过。
+      const xIn = targetX + sx * (1 - tEnter);
+      const xOut = targetX + sx * (1 - tExit);
+      if (Math.max(xIn, xOut) < b.minX || Math.min(xIn, xOut) > b.maxX) continue;
 
-      // 需要的抬升量：Δ·(1-t) = 缺口
-      const need = (b.top + 1.5 - sightY) / Math.max(0.2, 1 - t);
-      if (need > deficit) deficit = need;
+      // ---------------------------------------------------------------
+      //  【缺口必须按 tExit 算，不是 tEnter】—— 这一处算错过
+      // ---------------------------------------------------------------
+      // 视线高度沿 t 单调下降：rayY(t) = camY + (1.2 - camY)·t
+      // 所以在盒子区间内，**tExit 处视线最低**，那才是真正的瓶颈。
+      //
+      // 用 tEnter 会得到「视线刚进盒子时的高度」——那时还在高处，
+      // 算出来的缺口是负数，于是把一个明确遮挡的盒子判成「不挡」。
+      //
+      // 实测：城区西北机位，相机 y=31.5/z=153.7，角色 z=120，
+      // 房子顶 8.17、位于角色 +Z 侧 7.92：
+      //   tEnter=0.676 → rayY=11.02（高于屋顶 8.17）
+      //   tExit =0.854 → rayY=5.62 （低于屋顶 8.17）← 视线在这里穿过了屋顶
+      //   用 tEnter: need = -4.16  → 误判「不挡」
+      //   用 tExit : need = +20.23 → 正确判定「遮挡」
+      //
+      // 判据的正确写法：视线在区间内是否**跨过**了顶面，
+      // 即 t_enter 处高于顶、t_exit 处低于顶。
+      const sightIn = camY + (SIGHT_END_Y - camY) * tEnter;
+      const sightOut = camY + (SIGHT_END_Y - camY) * tExit;
+      if (sightOut >= b.top) continue;          // 离开盒子时仍高于顶 → 能越过
+      if (sightIn <= SIGHT_END_Y) continue;     // 进入盒子时已在地面以下 → 不成立
+
+      const need = (b.top + 1.5 - sightOut) / Math.max(0.2, 1 - tExit);
+      if (need > gap) gap = need;
     }
+    return gap;
+  };
 
-    if (deficit <= 0.01) break;      // 视线已通畅
+  // ---- 第 1 阶段：求一个「视线通畅」的抬升/距离组合 ----
+  // 迭代求解：抬升会改变视线落点，从而改变「哪一栋房子挡在前面」，
+  // 所以单次解析解不收敛。每轮 O(遮挡物数)，6 轮足够。
+  for (let iter = 0; iter < 6; iter++) {
+    const camY = baseY + lift;
+    const ez = baseDist - pull;
+    if (ez < 2) break;               // 距离已到下限，不能再近
 
+    const gap = sightGap(camY, targetZ + ez, shiftX);
+    if (gap <= 0.01) break;          // 视线已通畅
+
+    // 抬升优先；抬到上限仍不够就缩短距离。
     const room = maxLift - lift;
     if (room > 0.05) {
-      lift += Math.min(deficit, room);
+      lift += Math.min(gap, room);
     } else {
-      pull += Math.min(deficit * 0.4, (baseDist - minDist) - pull);
-      if (pull >= (baseDist - minDist) - 0.05) break;
-    }
-
-    // -------------------------------------------------------------------
-    //  【俯角约束 —— 缺了它画面会退化成俯瞰地图】
-    // -------------------------------------------------------------------
-    // 抬升和缩短是两个独立的量，必须靠「俯角上限」把它们绑在一起。
-    //
-    // 实测（没有这一约束时）：相机抬到 31而距离仍是 34，
-    // 俯角 = atan((31-1.2)/34) = 58.5° —— 几乎是垂直往下看。
-    // 画面读作一张俯视平面地图，斜俯视的立体感完全消失，
-    // 角色也被压到画面中央的一个小点。这比被树挡住更糟。
-    //
-    // 正确关系：俯角 = atan((camY - 1.2) / ez)，
-    // 要让俯角不超过 MAX_PITCH，就必须
-    //   ez >= (camY - 1.2) / tan(MAX_PITCH)
-    // 抬得越高，距离必须按比例拉远，俯角才不变。
-    //
-    // MAX_PITCH 取 42°：基准是 26°，42° 仍明确是「斜俯视」，
-    // 街景有明确的纵深压缩；再大就接近正上方了。
-    const minEzForPitch = (camY - SIGHT_END_Y) / Math.tan(MAX_PITCH);
-    if (ez < minEzForPitch) {
-      const grow = minEzForPitch - ez;
-      pull -= grow;                  // 负的 pull = 往后拉远
-      if (pull <= 0) { pull = 0; break; }   // 拉到底仍超限就接受
+      pull += Math.min(gap * 0.4, (baseDist - minDist) - pull);
     }
   }
 
-  return { lift, pull };
+  // ---- 第 2 阶段：俯角约束（必须在调整完成之后一次性生效）----
+  //
+  // 【这一段的位置是关键，写在迭代里会失效】
+  //
+  // 第一版把约束放进迭代循环开头，结果与末尾的缩短逻辑互相拉扯：
+  //   约束算出 pull -= 14.9（要拉远）
+  //   同一轮末尾缩短逻辑又pull += ...
+  //   下一轮约束再减……
+  // 两个方向在同一个变量上反复覆盖，最终收敛到「缩短下限」，
+  // 俯角依然是 58.5°，约束形同虚设。
+  //
+  // 约束是**边界条件**，不是迭代的一部分：
+  // 先求出任意一个可行解，再一次性把它投影到俯角允许的范围内。
+  //
+  // 俯角 = atan((camY - 1.2) / ez) <= MAX_PITCH
+  // ⟺ ez >= (camY - 1.2) / tan(MAX_PITCH)
+  // 抬得越高，距离必须按比例拉远，俯角才不变。
+  //
+  // 拉远之后视线会变得更平，可能重新被远处的房子挡住 ——
+  // 所以要再抬一点补回来，抬升上限依然生效。
+  for (let guard = 0; guard < 3; guard++) {
+    const camY = baseY + lift;
+    const ez = baseDist - pull;
+    const minEz = (camY - SIGHT_END_Y) / Math.tan(MAX_PITCH);
+    if (ez >= minEz) break;          // 俯角已合规
+
+    // 先直接按比例拉远到合规
+    pull -= (minEz - ez);
+
+    // 拉远后视线可能重新被挡 —— 补一次抬升
+    const newEz = baseDist - pull;
+    const gap = sightGap(camY, targetZ + newEz, shiftX);
+    if (gap > 0.01 && maxLift - lift > 0.05) {
+      // 抬升会让俯角再次超限，所以只能抬「刚好够」的部分
+      lift += Math.min(gap, maxLift - lift);
+    }
+  }
+
+  // ---- 第 3 阶段：水平绕行（唯一能解决「正后方有房」的手段）----
+  //
+  // 走到这里说明抬升与缩短都已用尽，视线仍被挡。
+  //
+  // 【横移必须与缩短联合，单靠横移无效 —— 这是本阶段的核心】
+  // 视线在盒子处的横向位移 = sx · (1 - tExit)。
+  // 房子通常在角色身后不远处，此时 tExit ≈ 0.87，(1 - tExit) ≈ 0.13 ——
+  // 也就是说 sx 挪 17 单位，视线在房子处只横移了 2.25。
+  // 而 7.6 宽的房子需要横移 ≥3.6 才绕得出去。**纯横移差了一倍。**
+  //
+  // 反过来缩短距离会让tExit 变小、(1-tExit) 变大，横移效率显著提高：
+  //   ez=34 → (1-tExit)=0.13 → sx=17 只横移 2.25（不够）
+  //   ez=19 → (1-tExit)=0.24 → sx=17 横移 4.03（够）
+  // 所以这里对每个横移量都重新解一遍最短可用距离，取两者都满足的第一个解。
+  //
+  // 【搜索顺序即择优】
+  // 可行解有无数个（横移越大、距离越近都能绕出去），但代价不同：
+  // 横移让构图歪、缩短让取景近。先扫横移方向与幅度（由小到大），
+  // 对每个横移量再从当前距离一路缩到下限 ——
+  // 于是找到的第一个解就是「横移最小、且在该横移下取景最远」的组合。
+  // 抬升不动：它已经在前两阶段用尽，这里再动只会让俯角更陡。
+  if (sightGap(baseY + lift, targetZ + (baseDist - pull), 0) > 0.01) {
+    const STEP = baseDist * 0.12;          // 每次横移约 4 单位
+    const STEPS = Math.max(1, Math.round(maxShift / STEP));
+    // 候选距离：从当前距离一路试到缩短下限。
+    // 逐个距离 × 逐个横移，找到第一个通畅组合即停 ——
+    // 距离按「由远到近」排列，所以找到的第一个就是取景最远的那档。
+    let best = null;
+    for (let dir = -1; dir <= 1 && !best; dir += 2) {
+      for (let k = 1; k <= STEPS && !best; k++) {
+        const sx = dir * k * STEP;
+        // 俯角 = atan((camY - SIGHT_END_Y) / ez) <= MAX_PITCH
+        //     ⟺ ez >= (camY - SIGHT_END_Y) / tan(MAX_PITCH)
+        //
+        // 【为什么必须逐个校验，而不是只在阶段结束时统一处理】
+        // 缩短到下限(0.55×34≈19) 且camY 已抬到 31.5 时，
+        // 俯角 = atan(30.3/19) = 58°，直接突破 48° 上限——
+        // 画面退化成俯视平面地图，比被房子挡住更糟。
+        // 实测正是这样：横街西口俯角飙到 54.7°。
+        //
+        // 最短合法距离就是这个 minEz，循环从它开始。
+        const minEz = (baseY + lift - SIGHT_END_Y) / Math.tan(MAX_PITCH);
+        for (let ez = baseDist - pull; ez >= minEz - 1e-6; ez -= STEP * 0.5) {
+          if (sightGap(baseY + lift, targetZ + ez, sx) <= 0.01) {
+            best = { sx, ez };
+            break;
+          }
+        }
+      }
+    }
+    if (best) {
+      shiftX = best.sx;
+      // 缩短量转回 pull 的表达（pull > 0 表示缩短）
+      pull += (baseDist - pull) - best.ez;
+    }
+  }
+
+  // ---- 兜底：任何路径都不允许突破俯角上限 ----
+  // 上面三个阶段各自都会改动 lift / pull，理论上可能叠加出超限的组合。
+  // 这个函数**绝不能返回俯角超过 MAX_PITCH 的解**——
+  // 画面退化成俯视平面地图，比被任何东西遮挡都更糟。
+  // 所以在这里无条件校正一次，不信任调用路径的自洽性。
+  {
+    const finalCamY = baseY + lift;
+    const minEz = (finalCamY - SIGHT_END_Y) / Math.tan(MAX_PITCH);
+    const ez = baseDist - pull;
+    if (ez < minEz) pull -= (minEz - ez);      // 拉远到合规
+  }
+
+  return { lift, pull, shiftX };
 }
 
 /**

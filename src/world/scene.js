@@ -28,7 +28,8 @@ import {
   SphereGeometry,
   CanvasTexture,
   LinearFilter,
-  RepeatWrapping
+  RepeatWrapping,
+  Vector3
 } from 'three';
 import * as HD2D_GEN from './hd2dTextures.js';
 import { initHD2D } from './textures.js';
@@ -236,11 +237,49 @@ export function createScene() {
   // 必须在 createOutskirts 之后调用 —— 列表是在生成房屋与树时累积的。
   const blockers = exportBlockers();
 
-  // 核心区（手写的港口部分）不在 city.js 里生成，
-  // 它的固定物在这里补登记。
+  // 自动收集散落道具的遮挡体积。
+  // 灯柱、木桶堆、长椅这些在 props.js 里用 userData.sight 自我声明，
+  // 这里遍历一次把它们收进来 —— 新增道具只要在工厂里加一行声明就生效，
+  // 不会再出现「道具挡了视线但相机不知道」这类漏登记。
+  blockers.push(...collectPropSightings(scene));
+
+  // 剩下两个体量太大、不能靠自身节点声明的固定物，在这里显式登记。
   for (const b of coreBlockers()) blockers.push(b);
 
   return { scene, sun, water, ground, blockers, SUN_OFFSET };
+}
+
+/**
+ * 遍历场景，收集所有带 `userData.sight` 声明的道具。
+ *
+ * 【为什么用圆柱而非 AABB】
+ * props.js 的 declareSight 用的是半径 r。灯柱、桶、长椅都是细长柱体，
+ * 换成 AABB 会把「半径 0.42 的灯柱」算成 0.84×0.84 的方块 ——
+ * 避障会为了一个实际上很细的柱子抬相机，画面无故变俯视。
+ *
+ * 【为什么要取世界坐标】
+ * 道具在 createPlaza / createHarbor 里被摆到不同父节点下，
+ * 局部坐标不等于世界坐标。逐个算 worldToLocal 容易漏，
+ * 直接用 getWorldPosition 更稳（道具量级只有几十个，遍历开销可忽略）。
+ *
+ * @param {THREE.Object3D} root 场景根
+ * @returns {Array<{minX,maxX,minZ,maxZ,top,solid}>} AABB 格式的遮挡列表
+ */
+function collectPropSightings(root) {
+  const out = [];
+  const v = new Vector3();
+  root.traverse((o) => {
+    const s = o.userData && o.userData.sight;
+    if (!s) return;
+    o.getWorldPosition(v);
+    out.push({
+      minX: v.x - s.r, maxX: v.x + s.r,
+      minZ: v.z - s.r, maxZ: v.z + s.r,
+      top: s.top,
+      solid: !!s.solid
+    });
+  });
+  return out;
 }
 
 /**

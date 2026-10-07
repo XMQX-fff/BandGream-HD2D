@@ -208,6 +208,10 @@ window.__HD2D__ = {
     stuck: hero.isStuck()
   }),
   setPlayerPos: (x, z) => hero.setPosition(x, z),
+  // 遮挡物列表本身也要给：诊断脚本要算「角色离最近实心建筑多远」，
+  // 光给个长度是算不出来的（之前 walk_test.py 读 H.blockers 拿到 undefined，
+  // nearWall 一路报 999，看着像贴墙很远，其实是数据根本没送到）。
+  blockers,
   blockerCount: () => blockers.length,
   solidCount: () => blockers.filter((b) => b.solid).length,
   camera, renderer, scene, composer

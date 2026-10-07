@@ -16,6 +16,15 @@
 
 用法:
   xvfb-run -a python3.11 tools/diagnose_camera.py [url] [--shots]
+
+【改完代码必须重启 dev server，否则测的是旧代码】
+诊断默认打http://localhost:5173/（vite dev）。
+Vite 会热更新模块，但本脚本每次都重新 goto 页面，
+所以只要 dev server 还在跑就会拿到新代码 ——
+**前提是 dev server 是在你改代码之后启动/仍在运行**。
+改完 camera.js 却看到诊断数值一字未变时，
+先确认 dev server 是否还活着（pkill 掉再起），
+不要立刻怀疑自己的逻辑写错了。
 """
 import json
 import sys

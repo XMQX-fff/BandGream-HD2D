@@ -38,6 +38,38 @@ const HD2D = initHD2D(HD2D_GEN);
 const MATS = {};
 
 /**
+ * 声明一个道具的「视线遮挡体积」。
+ *
+ * 【为什么需要它】
+ * 相机的避障完全依赖一份遮挡物列表。这份列表原先只有 city.js 里的
+ * 房子与树 —— 也就是说灯柱、木桶堆、长椅这些**实际会挡住视线**的道具
+ * 从来没被登记过。相机于���认为视线通畅，玩家却看到一盏灯横在面前。
+ * （诊断日志里那条 `(无名):Box @28` 就是漏登记的路灯。）
+ *
+ * 用法：在工厂函数 return 之前写一行
+ *   g.userData.sight = { r: 0.5, top: 3.8, solid: true };
+ *
+ * 字段：
+ *   r     —— 水平遮挡半径（圆柱近似，比 AABB 更贴道具实际形状）
+ *   top   —— 遮挡物顶面离地高度
+ *   solid —— true=也挡路（玩家不能穿过）；false=只挡视线
+ *            （树/长椅应填 false：玩家应该能从旁边走过）
+ *
+ * scene.js 会遍历场景收集所有带此标记的对象并转成 blocker，
+ * 所以**新增道具只要加这一行声明就自动生效**，不会再漏登记。
+ *
+ * @param {Group} g 道具根节点
+ * @param {number} r 水平半径
+ * @param {number} top 顶面高度
+ * @param {boolean} solid 是否挡路
+ * @returns {Group} 原节点，便于链式调用
+ */
+function declareSight(g, r, top, solid) {
+  g.userData.sight = { r, top, solid };
+  return g;
+}
+
+/**
  * 建筑/道具材质
  *
  * @param {string} genName hd2dTextures.js 里的生成函数名
@@ -290,7 +322,8 @@ export function createBarrel() {
     g.add(b);
   }
   g.add(createBlobShadow(0.62, 0.5, 0.8));
-  return g;
+  // 半径取桶身 0.42，顶部 0.95+0.05 留一点余量
+  return declareSight(g, 0.45, 1.0, true);
 }
 
 export function createCrate(s = 0.9) {
@@ -302,7 +335,8 @@ export function createCrate(s = 0.9) {
   g.add(box(s + 0.04, t, s + 0.04, edge, 0, s * 0.82, 0));
   g.add(box(s + 0.04, t, s + 0.04, edge, 0, t, 0));
   g.add(createBlobShadow(s * 0.82, 0.5, 0.8));
-  return g;
+  // 箱体对角一半：挡视线也挡路
+  return declareSight(g, s * 0.72, s * 0.95, true);
 }
 
 /** 木桶堆 / 木板堆等装饰堆 */
@@ -322,7 +356,8 @@ export function createBarrelStack() {
     g.add(b);
   }
   g.add(createBlobShadow(1.9, 0.42, 0.9));
-  return g;
+  // 堆高约 1.3，最外一只偏心 0.92，半径按最远边算
+  return declareSight(g, 1.45, 1.35, true);
 }
 
 /** 路灯（带发光灯罩，为 bloom 提供高光） */
@@ -350,7 +385,9 @@ export function createLampPost() {
 
   g.add(createBlobShadow(0.52, 0.55, 0.75));
   g.userData.glow = glowMat;
-  return g;
+  // 柱身很细（r=0.12），但灯罩挑到 3.7 —— 会遮住远处街景，
+  // 必须登记：漏了它相机会认为视线通畅，玩家却看到一盏灯横在面前。
+  return declareSight(g, 0.42, 3.75, true);
 }
 
 /** 系船柱 */
@@ -365,7 +402,8 @@ export function createMooringBollard() {
   cap.position.y = 0.78;
   g.add(cap);
   g.add(createBlobShadow(0.42, 0.55, 0.7));
-  return g;
+  // 只到 0.86，太矮 —— 视线从上方越过，只挡路不挡视线
+  return declareSight(g, 0.28, 0.9, true);
 }
 
 /** 栈桥（木板 + 支撑桩） */
@@ -506,7 +544,8 @@ export function createBanner() {
 
   g.add(createBlobShadow(0.44, 0.6, 0.6));
   g.userData.flag = flag;
-  return g;
+  // 旗杆细（r=0.08）但挑到 4.4，会挡住港口方向的远景
+  return declareSight(g, 0.35, 4.5, true);
 }
 
 /** 街灯油灯（放在木箱上，制造高低层次） */
@@ -526,7 +565,8 @@ export function createLantern() {
   g.add(base);
 
   g.userData.glow = glowMat;
-  return g;
+  // 油灯本身很小，只挡路不挡视线
+  return declareSight(g, 0.3, 1.0, true);
 }
 
 /* ================================================================== */
@@ -571,7 +611,8 @@ export function createPlanter(r = 1.4) {
   }
 
   g.add(createBlobShadow(r * 1.25, 0.45, 0.85));
-  return g;
+  // 花坛：挡住路，视线多半从上方越过
+  return declareSight(g, r * 1.15, 1.0, true);
 }
 
 /**
@@ -636,7 +677,8 @@ export function createBench() {
     g.add(leg);
   }
   g.add(createBlobShadow(1.15, 0.45, 0.8));
-  return g;
+  // 座面高 0.5，靠背挑到 1.1；玩家应能从旁边走过
+  return declareSight(g, 1.0, 1.15, false);
 }
 
 /** 广场树：树干 + 分枝 + 球簇树冠 */

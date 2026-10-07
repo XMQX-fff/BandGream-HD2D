@@ -191,6 +191,13 @@ export function exportBlockers() {
 }
 
 /**
+ * 屋脊比墙宽出的量（见 makeHouse 末尾的登记说明）。
+ * 与 props.js createHouse 里的 box(w + 0.9, 0.3, 0.42, ...) 保持一致——
+ * 同一事实写在两处，改一处必须改另一处。
+ */
+const ROOF_OVERHANG_X = 0.9;
+
+/**
  * 单栋房屋
  * @param {number} x @param {number} z 中心坐标
  * @param {number} w宽（X） @param {number} d 深（Z） @param {number} h 墙高
@@ -283,12 +290,20 @@ function makeHouse(x, z, w, d, h, roofH, lod, faceSouth = true) {
   // 存的是**包围盒**而不是中心点：避障要判断「相机是否在盒内」，
   // 中心点+半径的近似在长条形房屋上会算错。
   //
+  // 【尺寸必须覆盖屋脊，不能只量墙】
+  // createHouse 的屋脊是 box(w + 0.9, ...)，比墙宽出 0.9。
+  // 只登记 w 的话，屋脊会戳出登记盒之外 —— 射线诊断实测到
+  // 一个 11×7.5×8 的屋顶盒挂在 11 宽的登记盒侧面，
+  // 于是相机认为视线通畅，实际屋顶糊在镜头前。
+  // 斜屋顶的 Z 向悬挑不用管：panel 绕 X 旋转 slope 后
+  // 水平跨度恰好回到 d（斜长 × cos = d/2，居中偏移 d/4 × 2）。
+  //
   // solid = true：房子既挡视线也挡路。玩家不能穿墙，
   // 否则会走进房子内部，此时相机必然被四面墙围死。
   //
-  // 这里累积到模块级数组，由 exportBlockers() 一次性取走，
+  // 这里累积到模块级数组，由 exportBlockers()一次性取走，
   // 避免把数组参数层层往下传。
-  registerBlocker(x, z, w, d, h + roofH, true);
+  registerBlocker(x, z, w + ROOF_OVERHANG_X, d, h + roofH, true);
   return g;
 }
 

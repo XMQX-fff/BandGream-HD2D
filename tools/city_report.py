@@ -178,6 +178,65 @@ def main():
                      else ""))
         print()
 
+        # ---- 4b. 街区密度分布（本轮新增，度量「太密集」）----
+        #
+        # 【为什么必须新增这一项，而不是继续调「贴住率」】
+        # 上一轮的贴住率 66~68%、断口 0 看着完美，
+        # 但玩家仍然反馈「摆放太过密集、没有逻辑」——
+        # 说明**贴住率根本不是「密集」的正确度量**。
+        #
+        # 贴住率只沿主街量（zone='main'），
+        # 而「太密集」发生在**街区内部**（zone='perimeter'）：
+        # 那里每块 20×20 的地四边都塞满房子、墙缝仅 0.8、
+        # 地块之间只内缩 3.4 —— 整座城读作一堵连续的墙。
+        #
+        # 正确的度量是**单位面积内的建筑数**及其分布：
+        #   · 平均值高→ 确实太密
+        #   · 分布方差小 → 每块地都一样，读作「重复纹理」而非城市
+        # 只有同时看这两个，才能区分「密」与「单调」。
+        #
+        # 【为什么按 BLOCK 分桶而不是逐栋统计】
+        # 逐栋会淹掉空间信息 —— 我们要回答的是
+        # 「这个位置的地块挤不挤」，不是「这栋房子占多大」。
+        block = 20.0
+        cells = {}
+        for t in tags:
+            if t["zone"] != "perimeter":
+                continue
+            key = (int(t["x"] // block), int(t["z"] // block))
+            cells.setdefault(key, []).append(t)
+        if cells:
+            counts = sorted(len(v) for v in cells.values())
+            n_cells = len(counts)
+            mean = sum(counts) / n_cells
+            med = counts[n_cells // 2]
+            var = sum((c - mean) ** 2 for c in counts) / n_cells
+            # 变异系数：1.0 表示各街区密度完全一致（单调）
+            cv = (var ** 0.5) / mean if mean else 0
+            # 每 400 平米（20x20）的栋数换算成「每百平米」
+            dens = [c * 100.0 / (block * block) for c in counts]
+            print("【街区密度分布】%d 个街区内部地块（不含沿街）" % n_cells)
+            print("  每地块栋数：均 %.1f  中位 %d  最小 %d  最大 %d"
+                  % (mean, med, counts[0], counts[-1]))
+            print("  密度（栋/百平米）：p10 %.2f  中位 %.2f  p90 %.2f"
+                  % (dens[n_cells // 10], dens[n_cells // 2],
+                     dens[n_cells * 9 // 10]))
+            print("  变异系数 %.2f%s"
+                  % (cv, "  <<< 密度过于均匀，读作重复纹理而非城市"
+                     if cv < 0.25 else ""))
+            # 空地块（0 栋）意味着「地图长洞」
+            empty = sum(1 for c in counts if c == 0)
+            print("  空地块 %d 个%s"
+                  % (empty, "  <<< 街区内部有空洞" if empty > n_cells * 0.15
+                     else ""))
+            # 最高的 5% 算「过密」
+            p90 = dens[n_cells * 9 // 10]
+            over = sum(1 for d in dens if d > p90 * 1.6)
+            print("  过密地块（> p90×1.6）%d 个 = %.0f%%%s"
+                  % (over, 100.0 * over / n_cells,
+                     "  <<< 局部过密" if over > n_cells * 0.1 else ""))
+            print()
+
         # ---- 5. 高度分布 ----
         tops = sorted(t["top"] for t in tags)
         print("【高度分布】最低 %.1f 最高 %.1f 中位 %.1f"

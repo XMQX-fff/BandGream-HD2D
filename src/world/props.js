@@ -175,6 +175,11 @@ export function createBlobShadow(r = 1.2, skew = 0.5, opacity = 1) {
   // 太阳来自左后上方（-X, +Z），影子落在 +X, -Z 方向
   mesh.position.set(r * skew, 0.028, -r * skew);
   mesh.renderOrder = 2;
+  // 显式命名：诊断脚本要能把接触阴影与「漏注入淡出的建筑」区分开。
+  // 之前只能靠「transparent + depthWrite=false」去猜，
+  // 而这两个特征别的材质也可能带（比如水面）——
+  // 靠猜的断言迟早会把无辜材质误判成漏注入。
+  mesh.name = 'blob-shadow';
   return mesh;
 }
 

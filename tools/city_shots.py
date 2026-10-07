@@ -53,8 +53,40 @@ SHOTS = [
     ("d-block-interior", -6, 190, 20, "街区内部围合布局"),
 ]
 
+# ======================================================================
+#  【淡出验证机位 —— 由 tools/fade_scan.py 扫出来】
+# ======================================================================
+# 这批坐标不是手挑的：fade_scan.py 逐点调 fadeProbe，
+# 挑出「真的会触发淡出、且同时触发数最多」的位置。
+#
+# 本轮修掉了两个让手挑坐标必然失效的 bug：
+#   1. 遮挡盒曾全部登记在 (0,0) → 房子实际位置与碰撞盒完全脱节
+#   2. 横街cz=210 那条整条建在地图外→ 建筑分布整个变了
+# 手写的坐标在修复后毫无意义，必须重新扫。
+#
+# 每个机位旁边都标了「同时淡出几栋」——
+# 这是判断淡出是否过度的第一道闸门：
+# 超过 3 栋画面就会碎成筛子，实测全城只有 7 个点超过 3。
+FADE_SHOTS = [
+    # 扫描第一：同时淡出 5 栋，全城最密的一处。用来验证「淡出是否会糊成一片」
+    ("fade-1-dense", 32.0, 70.0, 180),
+    # 扫描第二：4 栋，含一栋 12 米高墙 —— 高墙遮挡是玩家最初抱怨的场景
+    ("fade-2-tall", 52.0, 2.0, 180),
+    # 扫描第三：4 栋，矮楼群（6.8 米）—— 验证矮楼淡出是否恰到好处
+    ("fade-3-low", 24.0, 82.0, 180),
+    # 扫描第四：3 栋，含全城最高的 16 米塔楼
+    ("fade-4-tower", 28.0, 102.0, 180),
+    # 空旷基准：按判据挑出的空旷点，必须**完全不淡**
+    ("fade-5-open", 112.0, 138.0, 180),
+]
+
 # 【关键】瞬移后必须等相机收敛,否则拍到的是阻尼暂态
-SETTLE_MS = 11000
+#
+# 【但等 11 秒在软渲染下是错的】帧率只有 1 fps，11 秒只跑 11 帧，
+# 而阻尼需要「帧数 × dt」累积到足够大 —— 实测相机仍在半路。
+# 现在改用 teleport（见 main.js 的 snapCamera），瞬移即落位，
+# 剩下的只是淡出低通收敛，2.5 秒足够。
+SETTLE_MS = 2500
 
 
 def main():
@@ -75,14 +107,36 @@ def main():
         for name, x, z, yaw, desc in SHOTS:
             # teleport + 设朝向。放在同一次 evaluate 里,
             # 避免两次 evaluate 之间 rAF 又跑了一帧导致朝向被输入覆盖
+            #
+            # 【用 teleport 而不是 setPlayerPos】
+            # setPlayerPos 只挪角色，相机仍被阻尼拉着飞。
+            # 软渲染 1 fps 下等 11 秒只有 11 帧，阻尼远未收敛 ——
+            # 拍出来的是相机还在半路的暂态，不是玩家看到的画面。
             page.evaluate(
                 """function (a) {
-                  window.__HD2D__.setPlayerPos(a[0], a[1]);
+                  window.__HD2D__.teleport(a[0], a[1]);
                   window.__HD2D__.faceTo(a[2]);
                 }""", [x, z, yaw])
             page.wait_for_timeout(SETTLE_MS)
             page.screenshot(path="docs/screenshots/city_%s.png" % name)
             print("  ✓ %-18s (%d,%d) %s" % (name, x, z, desc))
+
+        # ---- 淡出验证：拍之前先复位，避免拍到上个机位的残留 ----
+        print("\n淡出验证机位")
+        for name, x, z, yaw in FADE_SHOTS:
+            page.evaluate(
+                """function (a) {
+                  if (window.__HD2D__.fadeReset) window.__HD2D__.fadeReset();
+                  window.__HD2D__.teleport(a[0], a[1]);
+                  window.__HD2D__.faceTo(a[2]);
+                }""", [x, z, yaw])
+            page.wait_for_timeout(SETTLE_MS)
+            f = page.evaluate("() => window.__HD2D__.fadeStats()")
+            n = len(f["fading"]) if f else 0
+            vals = [round(v["fade"], 3) for v in (f["fading"] if f else [])]
+            page.screenshot(path="docs/screenshots/city_%s.png" % name)
+            print("  ✓ %-18s (%7.1f,%7.1f) 淡出 %d 栋 %s"
+                  % (name, x, z, n, vals))
 
         if errs:
             print("页面错误 %d 条：%s" % (len(errs), errs[:3]))

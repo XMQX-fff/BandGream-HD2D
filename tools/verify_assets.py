@@ -122,33 +122,69 @@ def check_blocker_source():
     import re
     root = os.path.join(ROOT, "src", "world")
 
-    with open(os.path.join(root, "city.js"), encoding="utf-8") as fp:
-        city = fp.read()
     with open(os.path.join(root, "props.js"), encoding="utf-8") as fp:
         props = fp.read()
+    with open(os.path.join(root, "buildingTypes.js"), encoding="utf-8") as fp:
+        types = fp.read()
 
-    # 屋脊悬挑：props 里的 box(w + N, ...) 与 city 里的 ROOF_OVERHANG_X
+    # 屋脊悬挑：几何在 props.js 里，实际登记在 buildingTypes.js 的 finish()
+    #
+    # 【常量位置变过一次，检查必须跟着走】
+    # 这项检查早前盯的是 city.js 的 ROOF_OVERHANG_X。
+    # 后来出挑逻辑随「登记盒与淡出组号统一到 blockers」一起搬进了
+    # buildingTypes.js，改名 EAVE —— 检查却还盯着旧名字与旧文件，
+    # 于是恒定报「找不到 ROOF_OVERHANGX」。
+    #
+    # 一个从不失败的检查比没有检查更糟：
+    # 它让人以为「这项已验证」，实际早就失效了。
+    # 所以断言必须指向**当前真实的数据流**，而不是历史上某个位置。
     m = re.search(r"box\(w \+ ([\d.]+), 0\.3, 0\.42", props)
     if not m:
         notes.append("未在 props.js 里定位到屋脊 box，屋脊悬挑检查跳过")
         return
     geo_overhang = float(m.group(1))
 
-    m2 = re.search(r"const ROOF_OVERHANG_X = ([\d.]+)", city)
+    m2 = re.search(r"const EAVE = ([\d.]+)", types)
     if not m2:
-        errors.append("city.js 里找不到 ROOF_OVERHANGX —— 房屋登记宽度没算屋脊")
-        return
-    reg_overhang = float(m2.group(1))
-
-    if abs(geo_overhang - reg_overhang) > 1e-6:
         errors.append(
-            "屋脊悬挑对不上：props.js 几何是 w+%.2f，city.js 登记是 w+%.2f\n"
-            "    登记盒比实际几何小 %.2f，屋脊会戳出盒外 —— "
+            "buildingTypes.js 里找不到 EAVE —— 房屋登记宽度没算屋脊")
+        return
+    eave = float(m2.group(1))
+
+    # 登记时按 w + EAVE * 2 加宽，所以几何侧也应是同一个值的两倍关系。
+    # 这里比的是「EAVE*2」与几何悬挑是否相等。
+    if not re.search(r"declareBuildingSight\(x, z, w \+ EAVE \* 2", types):
+        errors.append(
+            "finish() 里没有用 w + EAVE * 2 登记 —— "
+            "屋脊会戳出登记盒外")
+        return
+    reg_overhang = eave * 2
+
+    # 【只有「登记比几何小」才是 bug —— 方向不能搞反】
+    # 登记盒的作用是「覆盖住所有挡视线的几何」，所以：
+    #   登记 >= 几何 → 安全（盒把几何整个包住，多出来的一点余量无害）
+    #   登记 <  几何 → 屋脊戳出盒外 → 相机认为视线通畅，
+    #                 实际屋顶已经糊在镜头前
+    #
+    # 早前这项检查写的是 `abs(差值) > 1e-6` —— 不分方向，
+    # 于是「登记 1.00 / 几何 0.90」这种**完全安全**的情况也报失败。
+    # 报错文案还写着「登记盒比实际几何小 -0.10」，
+    # 一个负数出现在「小」字后面，自相矛盾。
+    #这类检查长期报错，人就会开始无视它 —— 比没有检查更糟。
+    if reg_overhang + 1e-6 < geo_overhang:
+        errors.append(
+            "屋脊悬挑登记不足：props.js 几何是 w+%.2f，登记只有 w+%.2f\n"
+            "    登记盒比几何小 %.2f，屋脊会戳出盒外 —— "
             "相机认为视线通畅，实际屋顶糊在镜头前。"
             % (geo_overhang, reg_overhang, geo_overhang - reg_overhang)
         )
+    elif abs(geo_overhang - reg_overhang) > 1e-6:
+        # 登记更大：安全，但值得说明余量有多少
+        print("  OK  屋脊悬挑登记留有余量 (几何 w+%.2f / 登记 w+%.2f，"
+              "余 %.2f)" % (geo_overhang, reg_overhang,
+                          reg_overhang - geo_overhang))
     else:
-        print("  OK  屋脊悬挑登记与几何一致 (w+%.2f)" % geo_overhang)
+        print("  OK  屋脊悬挑登记与几何一致 (w+%.2f = EAVE*2)" % geo_overhang)
 
 
 def check_meta():

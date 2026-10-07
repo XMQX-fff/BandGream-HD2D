@@ -218,7 +218,12 @@ with sync_playwright() as p:
 
     samples = []
     for i in range(40):
-        page.evaluate("(x) => window.__HD2D__.setPlayerPos(x, 140)", [10 + i * 3])
+        # 【必须用 teleport 而不是 setPlayerPos】
+        # setPlayerPos 只挪角色，相机被阻尼拉着飞。软渲染只有 1 fps，
+        # 300 ms 连一帧都跑不满 —— 采样到的全是「相机还没到」的中间态，
+        # 横移量读数会像随机数。之前 fade_probe 也在同一个坑里栽过。
+        # teleport 会连带把相机瞬移到位，读数才是真实的横移量。
+        page.evaluate(f"window.__HD2D__.teleport({10 + i * 3}, 140)")
         page.wait_for_timeout(300)
         d = page.evaluate(JS_SHIFT)
         samples.append(d)

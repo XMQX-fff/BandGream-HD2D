@@ -440,20 +440,22 @@ function chimney(x, y, z, m, h = 1.6) {
  */
 let SIGHT_REGISTRY = null;
 
-/** 由 city.js 在建城前调用一次，交出登记表 */
+/** 由 city.js 在建城前调用一次，交出登记表。返回值必须是登记后的下标。 */
 export function bindSightRegistry(fn) {
   SIGHT_REGISTRY = fn;
 }
 
 /**
  * 登记一栋建筑的视线遮挡体积。
- * @param {number} x @param {number} z 中心
- * @param {number} w 宽（含出挑） @param {number} d 深（含出挑）
- * @param {number} top 总高
- * @param {boolean} [solid] 是否实心。默认 true。
+ *
+ * @returns {number} 本栋在 city.js 的 BLOCKERS 里的下标，
+ *   直接用作淡出组号（见 city.js registerBlocker 的说明：
+ *   下标即组号是唯一不可能错位的做法）。
  */
 function declareBuildingSight(x, z, w, d, top, solid) {
-  if (SIGHT_REGISTRY) SIGHT_REGISTRY(x, z, w, d, top, solid !== false);
+  return SIGHT_REGISTRY
+    ? SIGHT_REGISTRY(x, z, w, d, top, solid !== false)
+    : -1;
 }
 
 /* ================================================================== */
@@ -491,7 +493,7 @@ export const BUILDING_TYPES = {
         g.add(chimney(w * 0.3, h + 0.9, -d * 0.2, stoneMat(seed)));
         g.add(cornerPosts(w, d, h, woodMat()));
       }
-      return finish(g, x, z, w, d, h + 1.5, rot, seed);
+      return finish(g, x, z, w, d, h + 1.5, rot, seed, 'cottage', true);
     }
   },
 
@@ -532,7 +534,7 @@ export const BUILDING_TYPES = {
         g.add(chimney(-w * 0.3, h + 1.0, -d * 0.18, stoneMat(seed)));
         g.add(cornerPosts(w, d, h, woodMat()));
       }
-      return finish(g, x, z, w, d, h + 1.7, rot, seed);
+      return finish(g, x, z, w, d, h + 1.7, rot, seed, 'townhouse', true);
     }
   },
 
@@ -567,7 +569,7 @@ export const BUILDING_TYPES = {
         }
         g.add(cornerPosts(w, d, h, woodMat()));
       }
-      return finish(g, x, z, w, d, h + 3.4, rot, seed);
+      return finish(g, x, z, w, d, h + 3.4, rot, seed, 'workshop', true);
     }
   },
 
@@ -602,7 +604,7 @@ export const BUILDING_TYPES = {
       arm.add(box(0.08, 1.1, 0.08, darkMat(), 0, h + 1.35, 1.1));
       arm.add(box(0.4, 0.3, 0.4, woodMat(), 0, h + 0.78, 1.1));
       g.add(arm);
-      return finish(g, x, z, w, d, h + 2.6, rot, seed);
+      return finish(g, x, z, w, d, h + 2.6, rot, seed, 'warehouse', true);
     }
   },
 
@@ -642,7 +644,7 @@ export const BUILDING_TYPES = {
       const finial = new Mesh(new CylinderGeometry(0.06, 0.06, 0.7, 6), darkMat());
       finial.position.set(0, h + 0.24 + 3.0 + 0.35, 0);
       g.add(finial);
-      return finish(g, x, z, w, d, h + 0.24 + 3.4, rot, seed);
+      return finish(g, x, z, w, d, h + 0.24 + 3.4, rot, seed, 'tower', true);
     }
   },
 
@@ -690,7 +692,7 @@ export const BUILDING_TYPES = {
       face.rotation.x = Math.PI / 2;
       face.position.set(-w * 0.24, h + 2.4 + th - 1.8, d / 2 - 0.6 + tw / 2);
       g.add(face);
-      return finish(g, x, z, w, d, h + 2.4 + th + 1.6, rot, seed);
+      return finish(g, x, z, w, d, h + 2.4 + th + 1.6, rot, seed, 'chapel', true);
     }
   },
 
@@ -737,7 +739,7 @@ export const BUILDING_TYPES = {
       }
       // 棚顶会挡视线（走进去相机要抬），但立柱之间是空当，人应该穿得过。
       // 两者诉求不同：视线遮挡照常登记，碰撞则放行。
-      return finish(g, x, z, w, d, h + 0.8, rot, seed, false);
+      return finish(g, x, z, w, d, h + 0.8, rot, seed, 'marketStall', false);
     }
   },
 
@@ -772,7 +774,7 @@ export const BUILDING_TYPES = {
       for (const sx of [-1, 1]) {
         g.add(box(0.22, wallH, d + yard, ym, (sx * (w + yard * 2)) / 2, wallH / 2, -yard / 2));
       }
-      return finish(g, x, z, w + yard * 2, d + yard * 1.2, h + 1.6, rot, seed);
+      return finish(g, x, z, w + yard * 2, d + yard * 1.2, h + 1.6, rot, seed, 'houseWithGarden', true);
     }
   },
 
@@ -802,7 +804,7 @@ export const BUILDING_TYPES = {
       g.add(panel);
       // 实心小屋：挡路。此前误传了 false（沿用旧的 walkable 语义），
       // 玩家能直接穿过棚子 —— 视觉上是 bug。
-      return finish(g, x, z, w, d, h + 0.9, rot, seed, true);
+      return finish(g, x, z, w, d, h + 0.9, rot, seed, 'shed', true);
     }
   }
 };
@@ -912,9 +914,11 @@ export function pickBuildingType(rng, tier = 'fill') {
  * 人应该能穿过去走 —— 两者诉求不同，此处按「角色可穿过」取舍。
  * 棚顶挡视线由 declareBuildingSight 单独登记解决，两者不互相绑架。
  *
- * @param {boolean} solid 是否实心（挡角色）。默认 true。
+ * @param {boolean} [solid] 是否实心（挡角色）。默认 true。
+ * @param {string} key 建筑类型名。用于遮挡淡出时按类型分级，
+ *                     也便于诊断脚本按类型统计。默认 ''。
  */
-function finish(g, x, z, w, d, top, rot, seed, solid = true) {
+function finish(g, x, z, w, d, top, rot, seed, key = '', solid = true) {
   g.position.set(x, 0, z);
   // 轻微偏转：绝对平行的房子读作复制粘贴。
   // ±0.08弧度（约 4.6°）足够破除规整感，又不会让沿街面出现明显折角。
@@ -924,7 +928,33 @@ function finish(g, x, z, w, d, top, rot, seed, solid = true) {
   g.add(createBlobShadow(Math.max(w, d) * 0.6, 0.32, 0.8));
   // 登记时把出挑算进去：EAVE 让屋顶比墙宽，
   // 只登记墙宽的话屋脊会戳出登记盒（这个坑犯过一次）。
-  declareBuildingSight(x, z, w + EAVE * 2, d + EAVE * 2, top, solid);
+  //
+  // 【登记顺序与组号】
+  // 必须在给g.userData.fadeGroup 赋值**之前**登记 ——
+  // fadeGroup 就是 declareBuildingSight 返回的 blockers 下标，
+  // 下标由 push 的时刻决定，与几何体创建顺序无关。
+  const sightIdx = declareBuildingSight(x, z, w + EAVE * 2, d + EAVE * 2, top, solid);
+
+  // ---------------------------------------------------------------------
+  //  分栋身份 —— 遮挡淡出（core/fade.js）的前提
+  // ---------------------------------------------------------------------
+  // 【为什么必须有这个】
+  // optimize.js 的 mergeStatics 会把上千个构件按材质合并成几十个大 mesh。
+  // 合并之后「一栋房子」不再是场景里的一个对象，
+  // 而是被打散进各个合并 mesh 里 —— 想让单独一栋楼变透明，
+  // 就必须知道「哪些顶点属于同一栋」。
+  //
+  // 所以这里把「本栋在 blockers 里的下标」写进 Group 的 userData，
+  // optimize.js 收集时会沿父链找到它，烘进合并几何的 aFadeId 顶点属性，
+  // fade.js 再拿这个号去查同一份 blockers —— 三方共用一个编号，
+  // 不存在需要同步的第二份数据。
+  //
+  // 【为什么不自增一个 FADE_ID】
+  // 那会引入第二套编号。一旦与 blockers 下标错位就是**静默错淡**：
+  // 查到隔壁那栋的保留率，画面上却把这栋淡掉了，
+  // 没有报错、没有日志，只有肉眼觉得「怪」。见 city.js 的详细说明。
+  g.userData.fadeGroup = sightIdx;
+  g.userData.fadeKind = key;
   return g;
 }
 
@@ -933,6 +963,13 @@ function finish(g, x, z, w, d, top, rot, seed, solid = true) {
 /* ================================================================== */
 
 const TAG_LOG = [];
+
+/*
+ * 注：本文件曾有一个自增的 FADE_ID 当淡出组号，现已删除。
+ * 组号改为直接采用「本栋在 city.js BLOCKERS 里的下标」——
+ * 少一套需要与 blockers 保持同步的编号，从根上排除静默错淡。
+ * 详见 city.js registerBlocker 的注释。
+ */
 
 /**
  * 记录一栋建筑的类型与尺寸，供诊断工具精确统计。

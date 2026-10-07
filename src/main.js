@@ -9,6 +9,7 @@ import { createScene, WORLD } from './world/scene.js';
 import { createCharacter } from './world/character.js';
 import { mergeStatics, countDrawables } from './core/optimize.js';
 import { bakeVertexAO } from './core/vertexAO.js';
+import { createFade, injectFade } from './core/fade.js';
 
 const canvas = document.getElementById('scene');
 const loadingEl = document.getElementById('loading');
@@ -104,6 +105,28 @@ const aoResult = (DEBUG_RAW || DEBUG_NOAO || DEBUG_NOMERGE)
 });
 console.info(`[HD2D] vertex AO: ${aoResult.baked} vertical meshes baked, ${aoResult.skipped} horizontal skipped`);
 
+// ---------- 建筑遮挡淡出 ----------
+//
+// 【为什么必须在 AO 烘焙之后注入】
+// bakeVertexAO 会为每个烘过的 mesh **克隆材质**（并按源材质缓存复用）。
+// 若在它之前注入 onBeforeCompile，克隆出来的材质不会继承注入 ——
+// 淡出会对「原材质生效、对克隆材质失效」，
+// 而恰好所有竖直构件（墙，也就是最该淡出的部分）都走了克隆。
+// 这个顺序依赖很隐蔽，日志里也看不出来，只有画面上「有的淡有的不淡」。
+//
+// 【为什么按 blockers 而不是「可见栋」建表】
+// fadeGroup 就是 blockers 的下标（见 city.js registerBlocker），
+// 所以查找表直接以 blockers 为准，一张表覆盖全部登记物，
+// 不需要额外的映射或重建。
+const fade = DEBUG_NOMERGE
+  ? null
+  : createFade(blockers);
+
+if (fade) {
+  injectFade(mergeStats.materials, fade.texture);
+  console.info(`[HD2D] building fade: ${blockers.length} groups, lut ready`);
+}
+
 // ---------- resize ----------
 function onResize() {
   const w = window.innerWidth;
@@ -170,6 +193,32 @@ function frame(now) {
   // 相机跟随
   updateCamera(camera, hero.state.x, 0, hero.state.z, dt);
 
+  // ---------------------------------------------------------------------
+  //  建筑遮挡淡出
+  // ---------------------------------------------------------------------
+  //
+  // 【为什么用 camera.position 而不是 desired】
+  // desired 是相机「即将到达」的位置，而实际渲染的是 camera.position
+  // （已被阻尼插值）。用 desired 判定会提前一帧淡出 ——
+  // 表现为角色还在楼前，楼就先淡了，边缘处闪一下。
+  //
+  // 【为什么必须在 updateCamera 之后】
+  // 判定依赖相机的真实位置与朝向。updateCamera 之前 camera.position
+  // 还是上一帧的落点，视线与实际画面不一致。
+  //
+  // 【终点用角色脚下而非胸口】
+  // 遮挡判据要的是「角色被挡住没有」，而角色精灵的贴图重心在脚下
+  // 附近。终点取 y=1.2（与 camera.js 的 SIGHT_END_Y 一致），
+  // 保证两套判据对「挡没挡」的判断不会打架 ——
+  // 若这里用别的值，会出现「相机认为通畅、淡出认为遮挡」的空档，
+  // 画面表现是「楼没淡但角色还是被挡」。
+  if (fade) {
+    fade.update(
+      camera.position.x, camera.position.y, camera.position.z,
+      hero.state.x, hero.state.z, dt
+    );
+  }
+
   // 俯角时间序列 —— 供 tools/pitch_test.py 读取。
   //
   // 【为什么必须逐帧记录，不能只暴露「当前俯角」】
@@ -207,6 +256,55 @@ function frame(now) {
 // ---------- 启动 ----------
 onResize();
 
+/**
+ * 让相机立即落到「跟随角色」的稳态位置，跳过阻尼插值。
+ *
+ * 【实现要点：不能简单地 camera.position.copy(desired)】
+ * desired 只在 updateCamera 内部算出来，算完立刻就被 lerp 消费掉了，
+ * 外部拿不到。所以这里复用同样的公式重算一次——
+ * **必须与 updateCamera 的基准一致**，否则相机会落在
+ * 「角色位置对、俯角错」的中间态，比不等还糟。
+ *
+ * 三个通道都要处理：
+ *   位置（含抬升/横移/缩距）→ 由 solveSightline 的结果决定
+ *   注视点（含 lookAhead 随抬升收缩）→ 同上
+ *   朝向 → lookAt
+ *
+ * 不改 userData 里的滤波状态（_lift/_shiftX/_clearFor）：
+ * 那些是「动画进行中」的状态，瞬移后让它们保持原值，
+ * 下一帧 updateCamera 会自然收敛到新位置——
+ * 强行清零反而会造成一次可见的镜头跳动。
+ */
+function snapCamera() {
+  const cfg = CAMERA_CONFIG;
+  const fit = cameraFit(camera.aspect);
+  const cam = camera.position;
+  const tx = hero.state.x;
+  const tz = hero.state.z;
+
+  // 与 updateCamera 相同的基准高度/距离
+  const baseY = cfg.height * fit.heightScale;
+  const baseDist = cfg.distance * fit.distScale;
+
+  // 稳态下滤波值已收敛，直接用当前滤波值当目标
+  const lift = camera.userData._lift;
+  const pull = camera.userData._pull;
+  const shift = camera.userData._shiftX;
+
+  cam.x = tx + shift;
+  cam.y = baseY + lift;
+  cam.z = tz + baseDist - pull;
+
+  // 注视点：与 updateCamera 同款，lookAhead 按抬升/缩距收缩
+  const liftRatio = Math.max(0, lift / Math.max(1e-6, baseY));
+  const pullRatio = Math.max(0, pull / Math.max(1e-6, baseDist));
+  const liftFactor = Math.max(0, 1 - Math.max(liftRatio / 0.9, pullRatio / 0.45));
+  const lookAhead = cfg.lookAhead * (1 - fit.lookAheadScale) * liftFactor;
+  camera.userData.target.set(tx + shift, 1.2 + fit.distScale * 2.2, tz - lookAhead);
+  camera.lookAt(camera.userData.target);
+  camera.updateMatrixWorld();
+}
+
 // 贴图异步加载，等一帧渲染完成后再淡出 loading
 requestAnimationFrame(frame);
 
@@ -227,12 +325,73 @@ window.__HD2D__ = {
   THREE: { Raycaster, Vector3 },
   mergeStats,
   drawables: () => countDrawables(scene),
+  /**
+   * 当前淡出状态。诊断脚本读它确认淡出真的在发生
+   * —— 画面上「楼变透明了」也可能来自后处理，不一定是我们注入的。
+   */
+  fadeStats: () => (fade ? fade.stats() : null),
+  /**
+   * 只算「该淡出谁」，不改动任何状态。
+   *
+   * 【为什么需要它 —— 测试机位不能再靠手挑】
+   * 原先 fade_probe.py 里四个机位坐标是手写的常数。
+   * 布局一改版（civic 地块留空、sparse 缺边），
+   * 那些坐标周围可能已经没有建筑了 ——
+   * 测出「0 栋淡出」，看起来像功能没生效，
+   * 实际是**测试点选在了空地上**。
+   *
+   * 与其猜坐标，不如让代码自己回答：
+   * 扫全城、返回真正会触发的点。这才是可信的测试集。
+   *
+   * 参数与 fade.probe 一致（相机位置 + 角色位置），
+   * 刻意**不接受 dt、也不写状态**——
+   * 诊断要的是「这一刻该淡谁」这个几何事实，
+   * 而不是「低帧率下跑了 3 帧后淡到了什么程度」。
+   */
+  fadeProbe: fade ? fade.probe : null,
+  /**
+   * 可玩城区范围（WORLD.bounds）。
+   * 诊断脚本必须按它圈定采样区 —— 遮挡物列表里还含 createOutskirts
+   * 撒的郊野散点，按遮挡物边界采样会跑到「房子浮在水面上」的荒地，
+   * 拍出来的图与城区布局毫无关系。
+   */
+  worldBounds: WORLD.bounds,
+  /**
+   * 立刻复位全部淡出状态（诊断用）。
+   * 软渲染只有 1.2 fps，靠「等它恢复」测不出干净的状态 ——
+   * 每个机位前先复位，断言才是确定性的。详见 core/fade.js 的 reset()。
+   */
+  fadeReset: fade ? fade.reset : null,
   getState: () => ({
     x: hero.state.x, z: hero.state.z, dir: hero.state.dir,
     // 卡在实心体内 = 穿模。诊断脚本据此判断碰撞是否生效。
     stuck: hero.isStuck()
   }),
   setPlayerPos: (x, z) => hero.setPosition(x, z),
+  /**
+   * 瞬移角色**并让相机立即落位**（跳过阻尼）。
+   *
+   * 【为什么必须单独开这个接口 —— 淡出测试踩出来的坑】
+   * setPlayerPos 只挪角色，相机仍被阻尼拉着飞过去。
+   * 软渲染下帧率只有 0.6 fps，阻尼系数 6.5/s 需要
+   * 「帧数 × dt」累积到足够大才能收敛 ——
+   * 实测等了 7 秒相机还停在半路（角色 z=190，相机却在 z=215，
+   * 方向甚至是反的），此时视线暂时通畅，
+   * 于是四个机位测出来的遮挡数全是 0。
+   *
+   * 症状极具误导性：看起来像「淡出功能完全没生效」，
+   * 实际是**相机根本没到测试位置**。
+   * 而淡出判定用的正是相机的真实位置 ——
+   * 判定没错，是输入的状态不对。
+   *
+   * 顺带也修好了截图脚本的老问题：
+   * city_shots.py 靠 SETTLE_MS=11000 硬等收敛，
+   * 在 0.6 fps 下这11 秒只跑了 6~7 帧，收敛并不彻底。
+   */
+  teleport: (x, z) => {
+    hero.setPosition(x, z);
+    snapCamera();
+  },
   /**
    * 只改朝向、不改位置。截图脚本用。
    * 【为什么需要单独一个接口】dir 是 0~3 的方向枚举,只在 character.js 的

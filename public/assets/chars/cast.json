@@ -1,0 +1,23 @@
+{
+  "tile": 32,
+  "dirs": 4,
+  "frames": 4,
+  "cast": [
+    "kasumi_toyama",
+    "ch_00",
+    "ch_01",
+    "ch_02",
+    "ch_04",
+    "ch_05",
+    "ch_07",
+    "ch_09"
+  ],
+  "rows": [
+    "down",
+    "up",
+    "left",
+    "right"
+  ],
+  "license": "hero: \"kasumi-orange\" sprite sheet from codex-pet.org (author lincoco), used with permission; NPC: Kenney Roguelike Characters (CC0) - kenney.nl",
+  "note": "hero = 户山香橙 (Kasumi Toyama, BanG Dream!) — codex-pet.org 素材；up 方向由 down 镜像压暗合成（原素材无背面帧）"
+}

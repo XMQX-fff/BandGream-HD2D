@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- 内联 SVG favicon：避免浏览器自动请求 /favicon.ico 产生 404。
+       图案取「斜阳 + 海面」—— HD-2D 画面的两个主色（暖光 / 冷海）。 -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%232a3a4a'/%3E%3Ccircle cx='11' cy='5' r='3.2' fill='%23ffd98a'/%3E%3Crect y='10' width='16' height='6' fill='%231d4a63'/%3E%3Crect y='10' width='16' height='1' fill='%23f0c070'/%3E%3C/svg%3E" />
+  <title>歧路旅人 · HD-2D 海港小镇</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0d1420; }
+    body {
+      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: #f4ece0;
+      user-select: none;
+    }
+
+    /* 画面本身故意用 image-rendering: pixelated，
+       这样浏览器缩放 canvas 时也保持硬像素边 */
+    #scene {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+    }
+    /* 触屏上单指拖动 = 移动，必须关掉浏览器默认的滚动/缩放/下拉刷新，
+       否则手指一动就变成页面滚动，角色纹丝不动。
+       touch-action:none 同时禁用双击缩放与双指缩放。 */
+    body.touch #scene {
+      touch-action: none;
+      overscroll-behavior: none;
+    }
+
+    /* ---------- Loading ---------- */
+    #loading {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 18px;
+      background: radial-gradient(ellipse at 50% 40%, #1c3550 0%, #0d1420 70%);
+      z-index: 100;
+      transition: opacity .6s ease, visibility .6s;
+    }
+    #loading.hidden { opacity: 0; visibility: hidden; }
+
+    .title {
+      font-size: 26px;
+      letter-spacing: 6px;
+      font-weight: 300;
+      color: #f5d9a0;
+      text-shadow: 0 0 22px rgba(245, 190, 110, .45);
+    }
+    .subtitle { font-size: 12px; letter-spacing: 4px; color: #8fb4cc; }
+
+    .bar {
+      width: 240px; height: 4px;
+      background: #24384c;
+      border-radius: 2px;
+      overflow: hidden;
+      margin-top: 10px;
+    }
+    .bar::after {
+      content: "";
+      display: block;
+      height: 100%; width: 40%;
+      background: linear-gradient(90deg, transparent, #f5c451, transparent);
+      animation: slide 1.15s ease-in-out infinite;
+    }
+    @keyframes slide {
+      0%   { transform: translateX(-100%); }
+      100% { transform: translateX(350%); }
+    }
+    #loading-text { font-size: 12px; color: #7f9db5; letter-spacing: 2px; }
+
+    /* ---------- 操作提示 ---------- */
+    #hud {
+      position: fixed;
+      left: 50%;
+      bottom: 26px;
+      transform: translateX(-50%);
+      padding: 9px 22px;
+      border-radius: 999px;
+      background: rgba(12, 20, 32, .62);
+      border: 1px solid rgba(245, 196, 81, .3);
+      backdrop-filter: blur(6px);
+      font-size: 12.5px;
+      letter-spacing: 1.5px;
+      color: #e8dcc4;
+      pointer-events: none;
+      z-index: 50;
+      white-space: nowrap;
+    }
+    /* 触屏上提示键盘按键毫无意义，换成「拖动移动」 */
+    body.touch #hud { display: none; }
+
+    /* ---------- 触屏浮动摇杆 ---------- */
+    /* 必须铺满全屏：#stick 自身若只有 0x0，指针命中测试会落空，
+       pointerdown 永远收不到（实测摇杆不出现、角色纹丝不动）。
+       圆圈用 fixed 定位画在真实按下点上，元素本身只负责接收事件。 */
+    #stick {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 60;
+      touch-action: none;
+      -webkit-tap-highlight-color: transparent;
+      display: none;
+    }
+    body.touch #stick { display: block; }
+    /* 外圈：落在按下点 */
+    #stick::before,
+    /* 内圈：跟随手指 */ #stick::after {
+      content: '';
+      position: fixed;
+      border-radius: 50%;
+      transform: translate(-50%, -50%);
+      opacity: 0;
+      transition: opacity .12s ease;
+      pointer-events: none;
+    }
+    #stick::before {
+      left: var(--ox, 0px); top: var(--oy, 0px);
+      width: 132px; height: 132px;
+      border: 2px solid rgba(245, 217, 160, .5);
+      background: radial-gradient(circle, rgba(245, 217, 160, .12), rgba(245, 217, 160, 0) 70%);
+    }
+    #stick::after {
+      left: var(--kx, 0px); top: var(--ky, 0px);
+      width: 54px; height: 54px;
+      background: radial-gradient(circle at 38% 34%, rgba(255, 240, 205, .95), rgba(245, 196, 81, .7));
+      box-shadow: 0 2px 10px rgba(0, 0, 0, .4);
+    }
+    #stick.on::before, #stick.on::after { opacity: 1; }
+    #hud kbd {
+      display: inline-block;
+      padding: 2px 7px;
+      margin: 0 2px;
+      border-radius: 4px;
+      background: rgba(245, 196, 81, .16);
+      border: 1px solid rgba(245, 196, 81, .38);
+      color: #f5c451;
+      font-family: inherit;
+      font-size: 11.5px;
+    }
+
+    /* ---------- 左上角标题 ---------- */
+    #brand {
+      position: fixed;
+      top: 20px; left: 24px;
+      z-index: 50;
+      pointer-events: none;
+      /* HUD 浮在天空/海面上，底色是不可控的浅色。
+         单层 text-shadow 压不住，副标题会整行消失（实测过）。
+         双层描边：先深色扩散再浅色内收，保证任何背景下都读得出。 */
+      text-shadow:
+        0 0 3px rgba(10, 18, 28, .95),
+        0 1px 2px rgba(10, 18, 28, .9),
+        0 2px 14px rgba(0, 0, 0, .55);
+    }
+    #brand .name {
+      font-size: 15px;
+      letter-spacing: 3px;
+      color: #f7dfae;
+    }
+    #brand .sub {
+      font-size: 10.5px;
+      letter-spacing: 2.5px;
+      /* 提亮到接近纯白：靠描边保证可读后，字色就该往亮走以呼应暖阳 */
+      color: #dcecf6;
+      margin-top: 3px;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="scene"></canvas>
+
+  <!-- 触屏浮动摇杆：按下即出现，松开即消失 -->
+  <div id="stick"></div>
+
+  <div id="brand">
+    <div class="name">托托哈海域</div>
+    <div class="sub">HD-2D PROTOTYPE</div>
+  </div>
+
+  <div id="hud">
+    <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 或方向键 移动
+  </div>
+
+  <div id="loading">
+    <div class="title">歧 路 旅 人</div>
+    <div class="subtitle">HD-2D · 海 港 小 镇</div>
+    <div class="bar"></div>
+    <div id="loading-text">正在加载资产…</div>
+  </div>
+
+  <script>
+    // 触屏环境标记：决定是否显示虚拟摇杆、隐藏键盘提示。
+    // 只看能力不看 UA：带触摸屏的笔记本也该能用摇杆，
+    // 而 UA 嗅探会把 iPad 桌面模式误判成桌面。
+    (function () {
+      const touch = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
+      if (touch) document.body.classList.add('touch');
+    })();
+  </script>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

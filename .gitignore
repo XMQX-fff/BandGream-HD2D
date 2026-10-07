@@ -1,0 +1,13 @@
+# 依赖与构建产物
+node_modules/
+dist/
+.publish-dist/
+
+# 编辑器 / 系统
+.DS_Store
+*.log
+.vite/
+
+# 运行时调试产物
+preview/
+*.local

@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>精灵图集检验 · 户山香澄</title>
+<style>
+  body { margin:0; background:#232a34; color:#f0e6d8;
+         font-family:"Segoe UI","PingFang SC",sans-serif; padding:20px; }
+  h2 { font-size:15px; font-weight:600; margin:18px 0 8px; color:#ffd98a; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; }
+  canvas { image-rendering:pixelated; background:#3a4654;
+           border:1px solid #556; }
+  .lbl { font-size:11px; opacity:.7; text-align:center; margin-top:3px; }
+  .cell { text-align:center; }
+  /* 模拟游戏内观感：32px 精灵缩到 ~77px，再经 PIXEL_SIZE=4 的像素化 */
+  .sim { image-rendering:pixelated; }
+  p { font-size:12px; opacity:.75; line-height:1.7; max-width:760px; }
+</style>
+</head>
+<body>
+<h1 style="font-size:18px">精灵图集检验 · 户山香澄 (Kasumi Toyama)</h1>
+<p>
+左：源图集 4×4（行 = down/up/left/right，列 = 帧）。<br>
+右：模拟游戏内实际观感 —— 精灵缩放到约 77px 高（世界高度 1.95），
+再按 PIXEL_SIZE=4 做最近邻像素化，看五官是否还读得出来。
+</p>
+
+<h2>① 源图集（放大 6 倍）</h2>
+<div class="row" id="atlas"></div>
+
+<h2>② 游戏内实际观感模拟（缩放 → 像素化 4）</h2>
+<div class="row" id="sim"></div>
+
+<h2>③ 单帧多倍率对照（正面第1帧）</h2>
+<div class="row" id="scales"></div>
+
+<script>
+const TILE = 32, COLS = 4, ROWS = 4, PIXEL = 4;
+const img = new Image();
+img.src = 'assets/chars/cast.png';
+img.onload = () => { buildAtlas(); buildSim(); buildScales(); };
+img.onerror = () => { document.body.insertAdjacentHTML('beforeend',
+  '<p style="color:#f88">图集加载失败 —— 请通过 http 服务访问本页，不要用 file://</p>'); };
+
+function cell(parent, src, sx, sy, sw, sh, dw, dh, label, cls) {
+  const wrap = document.createElement('div'); wrap.className = 'cell';
+  const c = document.createElement('canvas');
+  c.width = dw; c.height = dh;
+  if (cls) c.className = cls;
+  const g = c.getContext('2d');
+  g.imageSmoothingEnabled = false;
+  g.drawImage(src, sx, sy, sw, sh, 0, 0, dw, dh);
+  wrap.appendChild(c);
+  if (label) {
+    const d = document.createElement('div'); d.className='lbl'; d.textContent = label;
+    wrap.appendChild(d);
+  }
+  parent.appendChild(wrap);
+}
+
+function buildAtlas() {
+  const host = document.getElementById('atlas');
+  const S = 6;
+  const rows = ['down 正面','up 背面','left 左','right 右'];
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      cell(host, img, c*TILE, r*TILE, TILE, TILE, TILE*S, TILE*S,
+           c===0 ? rows[r] : ('f'+c), 'sim');
+    }
+  }
+}
+
+/** 把精灵画到低分辨率 RT 再放大 = RenderPixelatedPass 的等效模拟 */
+function pixelate(srcCanvas, outW, outH) {
+  const lo = document.createElement('canvas');
+  // 目标低分辨率：游戏里 77px 高 / PIXEL 4 ≈ 19px
+  lo.width  = Math.max(1, Math.round(outW / PIXEL));
+  lo.height = Math.max(1, Math.round(outH / PIXEL));
+  const lg = lo.getContext('2d');
+  lg.imageSmoothingEnabled = false;
+  lg.drawImage(srcCanvas, 0, 0, lo.width, lo.height);
+
+  const out = document.createElement('canvas');
+  out.width = lo.width * PIXEL; out.height = lo.height * PIXEL;
+  const og = out.getContext('2d');
+  og.imageSmoothingEnabled = false;
+  og.drawImage(lo, 0, 0, out.width, out.height);
+  return out;
+}
+
+function buildSim() {
+  const host = document.getElementById('sim');
+  const rows = ['down 正面','up 背面','left 左','right 右'];
+  const S = 3;                       // 32 * 3 = 96，接近游戏内 77px
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const tmp = document.createElement('canvas');
+      tmp.width = TILE*S; tmp.height = TILE*S;
+      const tg = tmp.getContext('2d'); tg.imageSmoothingEnabled = false;
+      tg.drawImage(img, c*TILE, r*TILE, TILE, TILE, 0, 0, TILE*S, TILE*S);
+      const px = pixelate(tmp, TILE*S, TILE*S);
+      const wrap = document.createElement('div'); wrap.className='cell';
+      wrap.appendChild(px);
+      const d = document.createElement('div'); d.className='lbl';
+      d.textContent = c===0 ? rows[r] : ('f'+c);
+      wrap.appendChild(d);
+      host.appendChild(wrap);
+    }
+  }
+}
+
+function buildScales() {
+  const host = document.getElementById('scales');
+  [2, 3, 4, 6, 8].forEach(S => {
+    const tmp = document.createElement('canvas');
+    tmp.width = TILE*S; tmp.height = TILE*S;
+    const tg = tmp.getContext('2d'); tg.imageSmoothingEnabled = false;
+    tg.drawImage(img, 0, 0, TILE, TILE, 0, 0, TILE*S, TILE*S);   // 正面第1帧
+    cell(host, tmp, 0, 0, tmp.width, tmp.height, tmp.width, tmp.height,
+         S+'× ('+(TILE*S)+'px)', 'sim');
+  });
+}
+</script>
+</body>
+</html>

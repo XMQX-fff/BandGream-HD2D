@@ -327,36 +327,60 @@ export function createCharacter(paletteKey = 'hero') {
    * 沿 X 推出后正好又被 Z 方向的另一面墙挡住，
    * 玩家在墙角里反复抖动。这里每帧只推一次最小位移，
    * 一次就能脱离，代价是偶尔会有一点点「贴墙感」，可以接受。
+   *
+   * ---------------------------------------------------------------------
+   * 单轮在**盒子重叠**时会失效：角色同时与两个盒子相交，
+   * 第一个把它推到 +X、第二个推到 -X，一轮下来净位移接近零，
+   * 角色就卡在重叠区里 —— 症状是「撞不进也走不出」。
+   *
+   * 实测（tools/collide_walk.py）：warehouse @(2.8, 188.3) 从 -X 方向走，
+   * 盒是 9.0×6.0，理论应停在 8.4（maxX + RADIUS），
+   * 实际停在 6.8 —— 被旁边一个盒子又推了回来。
+   *
+   * 迭代让推力累积：第 1 轮解决主要那一对，
+   * 第 2 轮处理被带偏后新碰上的盒子，第 3 轮收尾。
+   * 3 轮是实测收敛的上限，再多只是空转。
+   *
+   * 代价：每帧最多 3 倍的盒检查。
+   * 但玩家真正贴墙时相交盒通常只有 1~2 个（重叠是少数），
+   * 而第 2 轮起若没有任何位移就提前退出 —— 常态开销不变。
    */
+  const RESOLVE_ROUNDS = 3;
   function resolveCollisions() {
-    for (let i = 0; i < solids.length; i++) {
-      const b = solids[i];
-      // 圆 vs AABB 的快速排除：角色中心到盒子的最近点
-      const nx = state.x < b.minX ? b.minX : (state.x > b.maxX ? b.maxX : state.x);
-      const nz = state.z < b.minZ ? b.minZ : (state.z > b.maxZ ? b.maxZ : state.z);
-      const dx = state.x - nx;
-      const dz = state.z - nz;
-      const d2 = dx * dx + dz * dz;
-      if (d2 >= RADIUS * RADIUS) continue;   // 没碰到
+    for (let round = 0; round < RESOLVE_ROUNDS; round++) {
+      let moved = false;
+      for (let i = 0; i < solids.length; i++) {
+        const b = solids[i];
+        // 圆 vs AABB 的快速排除：角色中心到盒子的最近点
+        const nx = state.x < b.minX ? b.minX : (state.x > b.maxX ? b.maxX : state.x);
+        const nz = state.z < b.minZ ? b.minZ : (state.z > b.maxZ ? b.maxZ : state.z);
+        const dx = state.x - nx;
+        const dz = state.z - nz;
+        const d2 = dx * dx + dz * dz;
+        if (d2 >= RADIUS * RADIUS) continue;   // 没碰到
 
-      if (d2 > 1e-8) {
-        // 圆心在盒外：沿最近点方向推出
-        const d = Math.sqrt(d2);
-        const push = RADIUS - d;
-        state.x += (dx / d) * push;
-        state.z += (dz / d) * push;
-      } else {
-        // 圆心在盒内（已经穿墙）：推到最近的一条边外
-        const outL = state.x - b.minX;   // 往 -X 推的距离
-        const outR = b.maxX - state.x;   // 往 +X
-        const outB = state.z - b.minZ;   // 往 -Z
-        const outT = b.maxZ - state.z;   // 往 +Z
-        const m = Math.min(outL, outR, outB, outT);
-        if (m === outL) state.x = b.minX - RADIUS;
-        else if (m === outR) state.x = b.maxX + RADIUS;
-        else if (m === outB) state.z = b.minZ - RADIUS;
-        else state.z = b.maxZ + RADIUS;
+        if (d2 > 1e-8) {
+          // 圆心在盒外：沿最近点方向推出
+          const d = Math.sqrt(d2);
+          const push = RADIUS - d;
+          state.x += (dx / d) * push;
+          state.z += (dz / d) * push;
+        } else {
+          // 圆心在盒内（已经穿墙）：推到最近的一条边外
+          const outL = state.x - b.minX;   // 往 -X 推的距离
+          const outR = b.maxX - state.x;   // 往 +X
+          const outB = state.z - b.minZ;   // 往 -Z
+          const outT = b.maxZ - state.z;   // 往 +Z
+          const m = Math.min(outL, outR, outB, outT);
+          if (m === outL) state.x = b.minX - RADIUS;
+          else if (m === outR) state.x = b.maxX + RADIUS;
+          else if (m === outB) state.z = b.minZ - RADIUS;
+          else state.z = b.maxZ + RADIUS;
+        }
+        moved = true;
       }
+      // 一整轮都没动 → 已经稳定，提前退出（常态只跑 1 轮）
+      if (!moved) break;
     }
   }
 
@@ -381,6 +405,27 @@ export function createCharacter(paletteKey = 'hero') {
     sprite,
     shadow,
     state,
+    /**
+     * 暴露真实的碰撞求解给诊断脚本。
+     *
+     * 【为什么必须暴露，而不是让脚本自己复刻一份】
+     * collide_walk.py 原本在 Python/JS 里重写了一遍 resolveCollisions，
+     * 于是本轮给 resolveCollisions 加了「迭代 3 轮」之后，
+     * 脚本测的仍然是**旧的单轮版**——
+     * 我在实现里修好的东西，测试看不见。
+     *
+     * 症状极具欺骗性：改完代码、构建成功、测试「穿墙仍是 1」，
+     * 于是合理地怀疑「迭代没用」或「根因判断错了」，
+     * 又要去调一个已经调对的东西。
+     *
+     * 这与「诊断脚本复算生成参数」是同一个错误的两个方向：
+     *   · 脚本比实现**新** → 测的是没实现的逻辑
+     *   · 脚本比实现**旧** → 测不出已实现的修复
+     *
+     * 两种都会产生「看着像真实数据的假结论」。
+     * 唯一可靠的做法：诊断脚本只读实现自己报出来的数。
+     */
+    RADIUS,
 
     /** 每帧更新；返回是否在移动 */
     update(dt, dx, dz, bounds) {
@@ -421,6 +466,24 @@ export function createCharacter(paletteKey = 'hero') {
      */
     setColliders(list) {
       solids = (list || []).filter((b) => b.solid);
+    },
+
+    /**
+     * 对一个「假想状态」跑一遍真实的碰撞求解，不移动真正的角色。
+     *
+     * 诊断脚本用它来模拟「玩家从某个方向走向某栋房子」，
+     * 从而测到的是**线上真实运行的那份代码**，
+     * 而不是脚本自己抄的副本。
+     *
+     * @param {{x:number,z:number}} s 假想位置；函数会就地修改它
+     */
+    probeCollide(s) {
+      state.x = s.x;
+      state.z = s.z;
+      resolveCollisions();
+      s.x = state.x;
+      s.z = state.z;
+      return s;
     },
 
     /** 是否卡在某个实心体内（调试用：截图脚本可读取判断是否穿模） */

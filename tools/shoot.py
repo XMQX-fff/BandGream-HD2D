@@ -68,7 +68,7 @@ ARGS = [
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--url", default="http://localhost:5173/")
+    ap.add_argument("--url", default="http://127.0.0.1:4173/")
     ap.add_argument("--out", default="/tmp/shots")
     ap.add_argument("--viewports", action="store_true", help="追加平板/手机视口")
     ap.add_argument("--positions", action="store_true", help="截全部机位")

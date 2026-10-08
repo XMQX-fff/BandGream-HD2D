@@ -36,13 +36,13 @@ shader 注入、LUT 容量、aFadeId 写入这些完全正确的方向。
 否则扫出来的点与实际游玩时的触发条件不一致。
 
 用法:
-  xvfb-run -a python3.11 tools/fade_scan.py http://localhost:5173/
+  xvfb-run -a python3.11 tools/fade_scan.py http://127.0.0.1:4173/
 """
 import sys
 
 from playwright.sync_api import sync_playwright
 
-URL = "http://localhost:5173/"
+URL = "http://127.0.0.1:4173/"
 for a in sys.argv[1:]:
     if a.startswith("http"):
         URL = a

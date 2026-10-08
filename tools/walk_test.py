@@ -26,7 +26,7 @@ import sys
 
 from playwright.sync_api import sync_playwright
 
-URL = "http://localhost:5173/"
+URL = "http://127.0.0.1:4173/"
 SHOTS = "--shots" in sys.argv
 for a in sys.argv[1:]:
     if a.startswith("http"):

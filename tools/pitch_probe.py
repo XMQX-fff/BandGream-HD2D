@@ -39,7 +39,7 @@ import sys
 
 from playwright.sync_api import sync_playwright
 
-URL = "http://localhost:5173/"
+URL = "http://127.0.0.1:4173/"
 FRAMES = 200
 if "--frames" in sys.argv:
     FRAMES = int(sys.argv[sys.argv.index("--frames") + 1])

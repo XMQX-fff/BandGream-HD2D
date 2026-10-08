@@ -324,7 +324,17 @@ window.__HD2D__ = {
   // 会把整个 three 命名空间钉死，tree-shaking 失效，产物直接翻几倍。
   THREE: { Raycaster, Vector3 },
   mergeStats,
+  // scene 本身：诊断脚本要 traverse 才能统计
+  // 「有多少 mesh 带 aFadeId」「有没有房子落在水面外」——
+  // 这两类问题只看 blockers 数组是答不出来的。
+  scene,
   drawables: () => countDrawables(scene),
+  /**
+   * 主角控制器 —— 诊断脚本要跑**真实的**碰撞求解，
+   * 不能在脚本里抄一份（抄的那份会随实现演进而过期，
+   * 且过期的副本报出来的数字看着和真实的一样）。
+   */
+  hero,
   /**
    * 当前淡出状态。诊断脚本读它确认淡出真的在发生
    * —— 画面上「楼变透明了」也可能来自后处理，不一定是我们注入的。

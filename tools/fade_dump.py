@@ -22,7 +22,7 @@ import sys
 
 from playwright.sync_api import sync_playwright
 
-URL = "http://localhost:5173/"
+URL = "http://127.0.0.1:4173/"
 args = [a for a in sys.argv[1:]]
 if args and not args[0].startswith("http"):
     X = float(args[0]); Z = float(args[1])

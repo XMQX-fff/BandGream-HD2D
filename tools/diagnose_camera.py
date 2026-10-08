@@ -18,7 +18,7 @@
   xvfb-run -a python3.11 tools/diagnose_camera.py [url] [--shots]
 
 【改完代码必须重启 dev server，否则测的是旧代码】
-诊断默认打http://localhost:5173/（vite dev）。
+诊断默认打http://127.0.0.1:4173/（vite dev）。
 Vite 会热更新模块，但本脚本每次都重新 goto 页面，
 所以只要 dev server 还在跑就会拿到新代码 ——
 **前提是 dev server 是在你改代码之后启动/仍在运行**。
@@ -31,7 +31,7 @@ import sys
 import time
 from playwright.sync_api import sync_playwright
 
-URL = "http://localhost:5173/?debug=nomerge"
+URL = "http://127.0.0.1:4173/?debug=nomerge"
 SHOTS = "--shots" in sys.argv
 for a in sys.argv[1:]:
     if a.startswith("http"):

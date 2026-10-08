@@ -846,6 +846,71 @@ export const TYPE_FOOTPRINT = {
   shed:            { depth: 2.0, height: 3.1 }
 };
 
+/**
+ * 各类型**登记盒**的实际进深 —— 沿街推进必须按这个量。
+ *
+ * ---------------------------------------------------------------------
+ *  【为什么不能直接用 TYPE_FOOTPRINT.depth】
+ * ---------------------------------------------------------------------
+ * 登记盒（finish() 里 declareBuildingSight 的实参）比几何**大**，
+ * 而且大多少**按类型不同**：
+ *
+ *   多数类型      w + EAVE*2,      d + EAVE*2      → d + 1.00
+ *   带院独栋      w + yard*2,      d + yard*1.2    → d + 1.92
+ *                （yard = MODULE*0.8 = 1.6）
+ *
+ * 旧代码推进用 `b.depth + 0.6`，b.depth 来自 TYPE_FOOTPRINT，
+ * 也就是**几何进深**。于是「盒子」永远比「推进量」大 1.00~1.92，
+ * 后一栋的前脸插进前一栋的登记盒里。
+ *
+ * 实测后果（tools/collide_walk.py / trace_overlap.py）：
+ *   · 沿街相邻两栋的盒面净距 min = -3.46（负 = 重叠）
+ *   · 全城 641 对盒重叠、18 对建筑中心距 < 1.5m
+ *   · 464 栋抽样里 13 个方向能穿过去
+ *
+ * 穿墙的机制：resolveCollisions 每帧对**每个**相交盒各推一次，
+ * 两栋的推力方向相反 → 净位移趋近 0 → 角色卡在重叠区里进退不得。
+ *
+ * 【为什么这张表由本文件导出，而不是在 city.js 里另写一份】
+ * 数值必须与 finish() 的实参同源。复制一份就会漂移 ——
+ * 改了 finish() 忘了改表，重叠立刻回来，而且没有任何报错。
+ * 这里直接从常量派生，读 MODULE / EAVE，与几何无法脱钩。
+ */
+export const REG_DEPTH = (() => {
+  const H_GARD = MODULE * 0.8 * 1.2;   // houseWithGarden 的 yard*1.2
+  const base = {};
+  for (const [k, v] of Object.entries(TYPE_FOOTPRINT)) {
+    base[k] = v.depth + EAVE * 2;
+  }
+  base.houseWithGarden = TYPE_FOOTPRINT.houseWithGarden.depth + H_GARD;
+  return base;
+})();
+
+/**
+ * 各类型登记盒的**面宽** —— 跨路去重判矩形相交要用。
+ *
+ * 【为什么必须有，不能拿进深顶替】
+ * 几何面宽普遍**大于**进深（MODULE=2，仓库 8 宽 × 5 进深、
+ * 教堂 6 宽 × 7 进深、塔楼 4 宽 × 4 进深）。
+ * 用进深当宽度，会把「横向离得很远、只是沿街方向挨得近」的两栋
+ * 误判成重叠 —— 症状是每条街莫名少几栋房子，
+ * 而生成过程没有任何异常输出。
+ *
+ * 数值直接对应各 make() 里的 `const w = MODULE * n`，
+ * 加上 finish() 登记时的 EAVE*2（带院独栋加院墙余量）。
+ */
+export const REG_WIDTH = {
+  cottage:         MODULE * 2   + EAVE * 2,
+  townhouse:       MODULE * 2   + EAVE * 2,
+  workshop:        MODULE * 3   + EAVE * 2,
+  warehouse:       MODULE * 4   + EAVE * 2,
+  tower:           MODULE * 2   + EAVE * 2,
+  chapel:          MODULE * 3   + EAVE * 2,
+  marketStall:     MODULE * 2   + EAVE * 2,
+  houseWithGarden: MODULE * 2.5 + MODULE * 0.8 * 2,
+  shed:            MODULE * 1.5 + EAVE * 2,
+};
+
 
 /**
  * 加权抽取一个建筑类型。
@@ -858,7 +923,42 @@ export const TYPE_FOOTPRINT = {
  * 街区内部只是远景剪影，用小体量的民居/杂物棚填充就够了 ——
  * 在那里堆教堂塔楼既看不见、又是无意义的性能开销。
  */
+/**
+ * 按档位抽一个建筑类型。
+ *
+ * ---------------------------------------------------------------------
+ *  【档位名可以直接用 zone 名 —— 曾有一个静默失效的第三参数】
+ * ---------------------------------------------------------------------
+ * 旧签名是 `(rng, tier)`，表按 `table[tier]` 查。
+ * 但 city.js 一直用三个参数调用：
+ *   pickBuildingType(rng, 'fill', 'perimeter')
+ *   pickBuildingType(rng, 'fill', 'yard')
+ *
+ * 而 `table[tier]` 只看第���个参数 —— **第三参数被完全忽略**。
+ * 于是 perimeter 与 yard 两张精心设计的表从未被查到过，
+ * 全部落回 `fill`（含 6% tower、面宽 8.2 的带院独栋）。
+ *
+ * 恶劣性质：**不报错**。
+ * 表定义了、注释写得很认真、调用点写得很明确，
+ * 唯一的问题是「多传了一个参数」——
+ * 而 JS 对多余实参**完全静默**。
+ *
+ * 症状被误读成别的三件事：
+ *   · 围合区冒出塔楼 → 读作「天际线终于有起伏了」，实际是配错档
+ *   · 院内房子放不下 → 读作「院子太窄」，实际是拿到了带院独栋
+ *   · 围合重叠丢弃高 → 读作「几何矛盾」，实际是档位没生效
+ *
+ * 于是我改了 BLOCK、改了 inset、改了退让量 —— 全在调一个不存在的旋钮。
+ *
+ * 现在签名与调用点**一一对应**，多传参数不可能再悄悄吞掉：
+ * 档位表按 zone 命名，调用点传什么就查什么。
+ * 保留 `fill` 作为显式档位，供确实想用通用表的地方调用。
+ */
 export function pickBuildingType(rng, tier = 'fill') {
+  // 档位名可以写 `fill`（显式）或直接写 zone 名（main/cross/perimeter/yard）。
+  // 两种写法等价 —— zone 名本身就是合法的档位名，
+  // 这样调用点 `pickBuildingType(rng, zone)` 只需一个参数，
+  // 也就没有「多传一个参数被静默吞掉」的空间了。
   const table = {
     main: [['townhouse', 30], ['cottage', 22], ['houseWithGarden', 14],
       ['workshop', 12], ['marketStall', 10], ['chapel', 6], ['tower', 3], ['shed', 3]],
@@ -881,7 +981,27 @@ export function pickBuildingType(rng, tier = 'fill') {
     // 所以只给 6% 的塔楼 + 4% 的工坊（大烟囱，剪影高），
     // 合计 10% —— 站在街上时背景有起伏，走到内部时又仍是生活区。
     fill: [['cottage', 38], ['shed', 28], ['houseWithGarden', 18],
-      ['townhouse', 10], ['tower', 6]]
+      ['townhouse', 10], ['tower', 6]],
+    // -------------------------------------------------------------------
+    //  【perimeter：街区围合专用表，只用窄体量】
+    // -------------------------------------------------------------------
+    // 围合的每条边要排 2 栋，而边长 = BLOCK - 2*inset。
+    // 若允许面宽 9 的仓库进围合，四角不撞与每边 2 栋这两个要求
+    // 会互相矛盾（推导见 city.js 的 inset 处注释）——
+    // 几何上无解，只能靠去重丢房子，丢 19%~57% 不等。
+    //
+    // 用窄类型（面宽 4~5）之后矛盾消失，同一 BLOCK 能排下更多栋。
+    // 这也符合现实：沿街面用大体量（面宽 9的仓库临街），
+    // 街区内部用小体量（小屋、杂物棚）——
+    // 沿街立面与内部读起来是两个层次，这正是我们要的对比。
+    perimeter: [['cottage', 40], ['shed', 34], ['townhouse', 18], ['marketStall', 8]],
+    // -------------------------------------------------------------------
+    //  yard：院内填充专用表，只有最窄的两档
+    // -------------------------------------------------------------------
+    // 院子净宽只有 BLOCK - 2*inset - 2*退让 ≈ 18，
+    // 且要同时放下 2 栋 —— 每栋可用宽度不到 8。
+    // 面宽 4.6 的 townhouse 已经勉强，更宽的绝对放不下。
+    yard: [['shed', 62], ['marketStall', 38]],
   }[tier] || [['cottage', 1]];
 
   let total = 0;
@@ -985,7 +1105,23 @@ const TAG_LOG = [];
  * 类型必须由工厂自己报出来 —— 它是唯一知道真相的地方。
  */
 function tagBuilding(g, key, x, z, depth, top, zone) {
-  TAG_LOG.push({ key, x, z, depth, top, zone: zone || 'unknown' });
+  // 【必须记下 group 引用与 fadeGroup，否则「淡出缺失」这项没法逐栋校验】
+  // 上一轮三个 bug 全部是「数量对、明细错」，而诊断只统计数量：
+  //   777 个遮挡盒全在 (0,0)，solid 计数却一直是 874，完全正常。
+  //
+  // 淡出这一项更隐蔽 —— 房子照样渲染、只是永远不淡出，
+  // 画面上看不出「少了什么」，只有逐栋比对
+  // 「这栋的 fadeGroup 是否出现在几何体的 aFadeId 集合里」才能发现。
+  // 没有 group 引用就做不到这个比对。
+  //
+  // fadeGroup 在 finish() 里赋值，而 tagBuilding 由 city.js 在 make() 之后调用，
+  // 顺序上读得到；若读不到（-1）说明登记链断了，那本身就是结论。
+  TAG_LOG.push({
+    key, x, z, depth, top,
+    zone: zone || 'unknown',
+    group: g,
+    fadeGroup: (g && g.userData) ? g.userData.fadeGroup : undefined,
+  });
 }
 
 export { tagBuilding };

@@ -12,7 +12,9 @@
     "diagnose": "xvfb-run -a python3.11 tools/diagnose_camera.py",
     "walk": "xvfb-run -a python3.11 tools/walk_test.py",
     "verify": "python3.11 tools/verify_assets.py",
-    "build:cast": "python3.11 tools/build_cast.py"
+    "build:cast": "python3.11 tools/build_cast.py",
+    "publish": "python3.11 tools/publish.py",
+    "smoke": "python3.11 tools/publish_smoke.py"
   },
   "keywords": [
     "three.js",
